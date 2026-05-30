@@ -23,7 +23,7 @@ if sys.platform == "win32":
     except Exception as e:
         print(f"Failed to load user32: {e}")
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QObject, QTimer, QEasingCurve, QPropertyAnimation
-from PyQt6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor
+from PyQt6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QPen
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QFrame, QVBoxLayout, QHBoxLayout,
@@ -97,6 +97,7 @@ ADB = get_adb_path()
 _log_file = None
 _log_path = None
 _log_to_file_enabled = False
+_adb_processes = set()
 
 def _adb_log(msg):
     """写入ADB操作日志到文件"""
@@ -107,15 +108,47 @@ def _adb_log(msg):
         except: pass
 
 def adb_run(args, timeout=10):
+    proc = None
     try:
-        r = subprocess.run([ADB]+args, capture_output=True, text=True, timeout=timeout,
-                           creationflags=NO_WINDOW, stdin=subprocess.DEVNULL)
-        out = r.stdout.strip()
+        proc = subprocess.Popen([ADB]+args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, creationflags=NO_WINDOW, stdin=subprocess.DEVNULL)
+        _adb_processes.add(proc)
+        stdout, stderr = proc.communicate(timeout=timeout)
+        out = stdout.strip()
+        if not out and stderr:
+            out = stderr.strip()
         _adb_log(f"adb {' '.join(args)} => {out[:200]}")
         return out
+    except subprocess.TimeoutExpired:
+        if proc:
+            proc.kill()
+            try:
+                proc.communicate(timeout=1)
+            except Exception:
+                pass
+        _adb_log(f"adb {' '.join(args)} => TIMEOUT")
+        return ""
     except Exception as e:
         _adb_log(f"adb {' '.join(args)} => ERROR: {e}")
         return ""
+    finally:
+        if proc:
+            _adb_processes.discard(proc)
+
+def cleanup_adb_processes(kill_server=False):
+    for proc in list(_adb_processes):
+        try:
+            if proc.poll() is None:
+                proc.kill()
+        except Exception:
+            pass
+        _adb_processes.discard(proc)
+    if kill_server:
+        try:
+            subprocess.run([ADB, "kill-server"], capture_output=True, text=True, timeout=3,
+                           creationflags=NO_WINDOW, stdin=subprocess.DEVNULL)
+        except Exception:
+            pass
 
 
 class Adb:
@@ -287,14 +320,29 @@ class OsdHud(QWidget):
         
         self.timer.stop()
         self.anim.stop()
+        try:
+            self.anim.finished.disconnect()
+        except Exception:
+            pass
         self.setWindowOpacity(1.0)
         self.show()
+        self.raise_()
+        if sys.platform == "win32" and user32:
+            try:
+                user32.SetWindowPos(int(self.winId()), -1, x, y, self.width(), self.height(), 0x0010 | 0x0040)
+            except Exception:
+                pass
+        QTimer.singleShot(0, self.raise_)
         
         # Show on screen for 1.8 seconds
         self.timer.start(1800)
         
     def hide_smooth(self):
         self.anim.stop()
+        try:
+            self.anim.finished.disconnect()
+        except Exception:
+            pass
         self.anim.setStartValue(self.windowOpacity())
         self.anim.setEndValue(0.0)
         self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -378,6 +426,85 @@ class CloseConfirmDialog(QDialog):
         self.accept()
 
 
+class LoadingSpinner(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(42, 42)
+        self._angle = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(35)
+        self._timer.timeout.connect(self._rotate)
+        self._timer.start()
+
+    def _rotate(self):
+        self._angle = (self._angle + 10) % 360
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect().adjusted(5, 5, -5, -5)
+        base_pen = QPen(QColor(255, 255, 255, 36), 4)
+        base_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(base_pen)
+        painter.drawArc(rect, 0, 360 * 16)
+
+        arc_pen = QPen(QColor("#32e6f0"), 4)
+        arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(arc_pen)
+        painter.drawArc(rect, self._angle * 16, -115 * 16)
+
+
+class InstallProgressDialog(QDialog):
+    def __init__(self, apk_name, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("正在安装 APK")
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.setFixedSize(380, 178)
+
+        if parent:
+            self.setGeometry(
+                parent.geometry().x() + (parent.width() - self.width()) // 2,
+                parent.geometry().y() + (parent.height() - self.height()) // 2,
+                self.width(),
+                self.height()
+            )
+
+        top_layout = QVBoxLayout(self)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+
+        frame = QFrame(self)
+        frame.setObjectName("InstallProgressFrame")
+        frame.setStyleSheet("""
+            #InstallProgressFrame {
+                background-color: #2b2b2b;
+                border: 1px solid rgba(255, 255, 255, 0.12);
+                border-radius: 12px;
+            }
+        """)
+        top_layout.addWidget(frame)
+
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(26, 24, 26, 24)
+        layout.setSpacing(18)
+
+        layout.addWidget(LoadingSpinner(frame), 0, Qt.AlignmentFlag.AlignVCenter)
+
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(8)
+        title = SubtitleLabel("正在安装 APK", frame)
+        title.setStyleSheet("color: white; font-size: 17px; font-weight: 700;")
+        text_layout.addWidget(title)
+
+        desc = BodyLabel(f"正在安装 {apk_name}\n请保持显示器连接，完成前不要关闭软件。", frame)
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color: rgba(255, 255, 255, 0.78); font-size: 13px;")
+        text_layout.addWidget(desc)
+        layout.addLayout(text_layout, 1)
+
+
 class App(FluentWindow):
     # Signals for thread-safe UI updates
     log_signal = pyqtSignal(str)
@@ -386,6 +513,7 @@ class App(FluentWindow):
     jni_values_signal = pyqtSignal(dict)
     devices_signal = pyqtSignal(list)
     message_signal = pyqtSignal(str, str, str) # type, title, text
+    apk_install_finished = pyqtSignal(bool, str, str)
 
     def __init__(self):
         super().__init__()
@@ -424,6 +552,7 @@ class App(FluentWindow):
         self.is_forcing_exit = False
         self.page_status_indicators = []
         self.adb_connected = False
+        self._cleanup_done = False
 
         # Window properties
         self.setWindowTitle("红米 G Pro 27U Toolbox")
@@ -436,6 +565,7 @@ class App(FluentWindow):
         self.jni_values_signal.connect(self._apply_polled_jni_values)
         self.devices_signal.connect(self._update_scanned_devices)
         self.message_signal.connect(self._show_message_box)
+        self.apk_install_finished.connect(self._on_apk_install_finished)
 
         # Setup layout and components
         self.osd = OsdHud(self)
@@ -446,6 +576,11 @@ class App(FluentWindow):
 
         # 页面切换时按需加载数据
         self.stackedWidget.currentChanged.connect(self._on_page_changed)
+        self.adb_keepalive_timer = QTimer(self)
+        self.adb_keepalive_timer.setInterval(15000)
+        self.adb_keepalive_timer.timeout.connect(self._keep_adb_alive)
+        self.adb_keepalive_timer.start()
+        QApplication.instance().aboutToQuit.connect(self.cleanup_before_exit)
 
     def setup_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
@@ -631,6 +766,8 @@ class App(FluentWindow):
         next_val, next_name = state_tuples[next_idx]
         
         self.pending_notifications[sk] = (next_val, label_name, next_name)
+        if getattr(self, "osd", None):
+            self.osd.show_hud(label_name, next_name)
         
         try:
             exec_fn(next_val, next_name)
@@ -646,6 +783,8 @@ class App(FluentWindow):
                         break
             async_run(verify)
         except Exception as e:
+            if sk in self.pending_notifications:
+                del self.pending_notifications[sk]
             self.log(f"快捷键执行失败: {e}")
 
     def query_setting_or_jni(self, sk):
@@ -680,9 +819,9 @@ class App(FluentWindow):
             return
         for key, (target_val, feature_name, value_name) in list(self.pending_notifications.items()):
             if key in new_vals and str(new_vals[key]) == str(target_val):
-                if getattr(self, "osd", None):
+                if getattr(self, "osd", None) and not self.osd.isVisible():
                     self.osd.show_hud(feature_name, value_name)
-                else:
+                elif not getattr(self, "osd", None):
                     self.tray_icon.showMessage(
                         "红米 G Pro 27U Toolbox",
                         f"{feature_name} 已成功设置为：{value_name}",
@@ -691,13 +830,55 @@ class App(FluentWindow):
                     )
                 del self.pending_notifications[key]
 
+    def _keep_adb_alive(self):
+        if getattr(self, "_cleanup_done", False):
+            return
+        if not getattr(self, "adb_connected", False) or not self.adb.ip:
+            return
+        ip = self.adb.ip
+
+        def do():
+            state = adb_run(["-s", f"{ip}:5555", "get-state"], timeout=3).strip().lower()
+            if state != "device":
+                adb_run(["connect", f"{ip}:5555"], timeout=5)
+
+        async_run(do)
+
+    def cleanup_before_exit(self):
+        if getattr(self, "_cleanup_done", False):
+            return
+        self._cleanup_done = True
+        try:
+            self.unregister_all_hotkeys()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "adb_keepalive_timer"):
+                self.adb_keepalive_timer.stop()
+        except Exception:
+            pass
+        try:
+            if self.adb.ip:
+                adb_run(["disconnect", f"{self.adb.ip}:5555"], timeout=3)
+        except Exception:
+            pass
+        cleanup_adb_processes(kill_server=True)
+        try:
+            if _log_file:
+                _log_file.flush()
+                _log_file.close()
+        except Exception:
+            pass
+
     def force_exit(self):
         self.is_forcing_exit = True
         self.tray_icon.hide()
+        self.cleanup_before_exit()
         QApplication.quit()
 
     def closeEvent(self, event):
         if getattr(self, "is_forcing_exit", False):
+            self.cleanup_before_exit()
             event.accept()
             return
             
@@ -709,6 +890,7 @@ class App(FluentWindow):
                 self.hide()
             else:
                 self.tray_icon.hide()
+                self.cleanup_before_exit()
                 event.accept()
                 QApplication.quit()
         else:
@@ -732,6 +914,7 @@ class App(FluentWindow):
                     )
                 else:
                     self.tray_icon.hide()
+                    self.cleanup_before_exit()
                     event.accept()
                     QApplication.quit()
             else:
@@ -887,9 +1070,9 @@ class App(FluentWindow):
         elif "扫描完成" in text:
             status_suffix = f"🟡 {text}"
             self.status_label.setStyleSheet("color: #b85c00; font-weight: bold; font-size: 14px;")
-            # 扫描完成后自动连接第一个设备
+            # 扫描完成后自动连接优先匹配到的显示器
             if self.dev_combo.count() > 0 and not self.adb_connected:
-                self._on_dev_sel(0)
+                self._on_dev_sel(self.dev_combo.currentIndex())
         elif "未连接" in text or "失败" in text:
             status_suffix = "🔴 未连接"
             self.status_label.setStyleSheet("color: #d83b01; font-weight: bold; font-size: 14px;")
@@ -1024,8 +1207,10 @@ class App(FluentWindow):
 
         # Log Card
         log_card = SimpleCardWidget(container)
+        log_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         log_layout = QVBoxLayout(log_card)
         log_layout.setContentsMargins(15, 15, 15, 15)
+        log_layout.setSpacing(12)
         
         log_title = SubtitleLabel("实时操作日志", log_card)
         log_layout.addWidget(log_title)
@@ -1060,7 +1245,8 @@ class App(FluentWindow):
         log_btn_row.addWidget(open_log_btn)
         log_layout.addLayout(log_btn_row)
 
-        layout.addWidget(log_card)
+        layout.addWidget(log_card, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addStretch(1)
         return container
 
     def _make_picture_page(self):
@@ -2090,10 +2276,14 @@ class App(FluentWindow):
         self.dev_combo.clear()
         for ip, model in dev_list:
             self.dev_combo.addItem(f"{model} ({ip})")
-        self.dev_combo.blockSignals(False)
-
+        preferred_index = 0
+        for i, (ip, model) in enumerate(dev_list):
+            if "mitv" in str(model).lower():
+                preferred_index = i
+                break
         if dev_list:
-            self.dev_combo.setCurrentIndex(0)
+            self.dev_combo.setCurrentIndex(preferred_index)
+        self.dev_combo.blockSignals(False)
 
     def _on_dev_sel(self, index):
         if index < 0:
@@ -2132,16 +2322,31 @@ class App(FluentWindow):
             return
         apk_path, _ = QFileDialog.getOpenFileName(self, "选择要安装的 APK 文件", "", "APK Files (*.apk)")
         if apk_path:
-            self.log(f"正在安装: {os.path.basename(apk_path)} ...")
+            apk_name = os.path.basename(apk_path)
+            self.log(f"正在安装: {apk_name} ...")
+            self.apk_install_dialog = InstallProgressDialog(apk_name, self)
+            self.apk_install_dialog.show()
             def do():
                 r = adb_run(["-s", f"{self.adb.ip}:5555", "install", "-r", apk_path], timeout=60)
                 if "Success" in r:
-                    self.message_signal.emit("info", "安装成功", f"应用 {os.path.basename(apk_path)} 安装成功！")
-                    self.log("APK 安装成功")
+                    self.apk_install_finished.emit(True, apk_name, "")
                 else:
-                    self.message_signal.emit("error", "安装失败", f"安装失败: {r}")
-                    self.log("APK 安装失败")
+                    self.apk_install_finished.emit(False, apk_name, r.strip())
             async_run(do)
+
+    def _on_apk_install_finished(self, ok, apk_name, detail):
+        dialog = getattr(self, "apk_install_dialog", None)
+        if dialog:
+            dialog.accept()
+            dialog.deleteLater()
+            self.apk_install_dialog = None
+
+        if ok:
+            self.log("APK 安装成功")
+            self._show_message_box("info", "安装成功", f"应用 {apk_name} 安装成功！")
+        else:
+            self.log("APK 安装失败")
+            self._show_message_box("error", "安装失败", f"安装失败: {detail[:1800]}")
 
     # ===== 按需数据加载 =====
 
