@@ -474,6 +474,44 @@ class StateMachineTests(unittest.TestCase):
         self.assertEqual(vals, {"a": 1, "b": 2})
         self.assertEqual(calls, [("batch", ("a", "b")), ("single", "b", False)])
 
+    def test_tray_click_toggles_visible_window_to_tray(self):
+        calls = []
+
+        class FakeApp:
+            def windowState(self):
+                return app.Qt.WindowState.WindowNoState
+
+            def isVisible(self):
+                return True
+
+            def hide(self):
+                calls.append("hide")
+
+            def show_and_raise(self):
+                calls.append("show")
+
+        app.App.on_tray_activated(FakeApp(), app.QSystemTrayIcon.ActivationReason.Trigger)
+        self.assertEqual(calls, ["hide"])
+
+    def test_tray_click_restores_hidden_window(self):
+        calls = []
+
+        class FakeApp:
+            def windowState(self):
+                return app.Qt.WindowState.WindowNoState
+
+            def isVisible(self):
+                return False
+
+            def hide(self):
+                calls.append("hide")
+
+            def show_and_raise(self):
+                calls.append("show")
+
+        app.App.on_tray_activated(FakeApp(), app.QSystemTrayIcon.ActivationReason.Trigger)
+        self.assertEqual(calls, ["show"])
+
 
 if __name__ == "__main__":
     unittest.main()

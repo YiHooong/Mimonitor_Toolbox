@@ -1296,7 +1296,7 @@ class App(FluentWindow):
     def on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger or reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             is_minimized = bool(self.windowState() & Qt.WindowState.WindowMinimized)
-            if self.isVisible() and self.isActiveWindow() and not is_minimized:
+            if self.isVisible() and not is_minimized:
                 self.hide()
             else:
                 self.show_and_raise()
