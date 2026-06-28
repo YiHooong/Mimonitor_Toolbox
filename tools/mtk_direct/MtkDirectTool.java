@@ -1,4 +1,5 @@
 import android.util.Log;
+import java.io.File;
 import java.io.FileWriter;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
@@ -6,6 +7,8 @@ import java.lang.reflect.Method;
 public class MtkDirectTool {
     private static final String TAG = "MtkDirectTool";
     private static final String RESULT_FILE = "/data/data/mitv.service/cache/.jni_result";
+    private static final String BATCH_RESULT_FILE =
+            "/sdcard/Download/Mimonitor_Toolbox/.mtk_batch_result.txt";
     private static final String TV_CLASSPATH =
             "/system/framework/mitvmiddlewareimpl.jar:/system_ext/priv-app/TvServices/TvServices.apk";
     private static final String NATIVE_LIB_PATH = "/vendor/lib64:/system/lib64:/system_ext/lib64";
@@ -15,14 +18,27 @@ public class MtkDirectTool {
         Log.d(TAG, msg);
     }
 
-    private static void writeResult(String value) {
+    private static void writeFile(String path, String value) {
         try {
-            FileWriter fw = new FileWriter(RESULT_FILE);
+            File file = new File(path);
+            File parent = file.getParentFile();
+            if (parent != null && !parent.exists()) {
+                parent.mkdirs();
+            }
+            FileWriter fw = new FileWriter(file);
             fw.write(value);
             fw.close();
         } catch (Exception e) {
             Log.e(TAG, "Failed to write result file: " + e.getMessage());
         }
+    }
+
+    private static void writeResult(String value) {
+        writeFile(RESULT_FILE, value);
+    }
+
+    private static void writeBatchResult(String value) {
+        writeFile(BATCH_RESULT_FILE, value);
     }
 
     private static ClassLoader tvClassLoader() throws Exception {
@@ -72,16 +88,36 @@ public class MtkDirectTool {
         writeResult(String.valueOf(configRet));
     }
 
+    private static void batchGet(Method getConfigValueNative, String[] keys, int startIndex) {
+        StringBuilder sb = new StringBuilder();
+        long startMs = System.currentTimeMillis();
+        int count = 0;
+        for (int i = startIndex; i < keys.length; i++) {
+            String k = keys[i];
+            if (k == null || k.length() == 0) {
+                continue;
+            }
+            count++;
+            try {
+                int val = (Integer) getConfigValueNative.invoke(null, -1, k);
+                sb.append(k).append("=").append(val).append("\n");
+            } catch (Throwable e) {
+                sb.append(k).append("=ERROR:").append(e.getClass().getSimpleName()).append("\n");
+            }
+        }
+        sb.append("__elapsed_ms=").append(System.currentTimeMillis() - startMs).append("\n");
+        writeBatchResult(sb.toString());
+        log("RESULT: BATCH_GET keys=" + count);
+    }
+
     public static void main(String[] args) throws Exception {
         if (args.length == 0) {
-            log("Usage: MtkDirectTool <get/set/getMinMax/setColorGains/setHdrToneMapping/dump> [args]");
+            log("Usage: MtkDirectTool <get/set/batchGet/getMinMax/setColorGains/setHdrToneMapping/dump> [args]");
             return;
         }
 
         String cmd = args[0];
         String key = args.length >= 2 ? args[1] : null;
-        int value = args.length >= 3 ? Integer.parseInt(args[2]) : 0;
-        int isUpdate = args.length >= 4 ? Integer.parseInt(args[3]) : 1;
 
         try {
             ClassLoader classLoader = tvClassLoader();
@@ -118,6 +154,14 @@ public class MtkDirectTool {
                 log("RESULT: GET " + key + " = " + val);
                 writeResult(String.valueOf(val));
 
+            } else if ("batchGet".equals(cmd)) {
+                if (args.length < 2) {
+                    log("ERROR: batchGet requires at least one key");
+                    writeBatchResult("ERROR\n");
+                    return;
+                }
+                batchGet(getConfigValueNative, args, 1);
+
             } else if ("setHdrToneMapping".equals(cmd)) {
                 if (args.length < 2) {
                     log("ERROR: setHdrToneMapping requires value [isUpdate]");
@@ -134,6 +178,8 @@ public class MtkDirectTool {
                     writeResult("ERROR");
                     return;
                 }
+                int value = args.length >= 3 ? Integer.parseInt(args[2]) : 0;
+                int isUpdate = args.length >= 4 ? Integer.parseInt(args[3]) : 1;
                 int ret = (Integer) setConfigValueNative.invoke(null, -1, key, value, isUpdate);
                 log("RESULT: SET " + key + " to " + value + " (isUpdate=" + isUpdate + "), return: " + ret);
                 writeResult(String.valueOf(ret));

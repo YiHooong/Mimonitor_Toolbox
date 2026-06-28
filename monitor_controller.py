@@ -337,6 +337,7 @@ GUARDIAN_ACCESSIBILITY = f"{GUARDIAN_PACKAGE}/{GUARDIAN_PACKAGE}.AdbGuardianAcce
 GUARDIAN_APK_NAME = "adbguardian-signed.apk"
 MTK_DIRECT_TOOL_NAME = "MtkDirectTool.jar"
 COLORFUL_LED_TOOL_NAME = "ColorfulLedTool.jar"
+MTK_BATCH_RESULT_FILE = "/sdcard/Download/Mimonitor_Toolbox/.mtk_batch_result.txt"
 XIAOMI_TO_MTK_COLOR_TEMP = {0: 1, 1: 2, 2: 3, 3: 0, 4: 4, 5: 5, 8: 6}
 MTK_TO_XIAOMI_COLOR_TEMP = {v: k for k, v in XIAOMI_TO_MTK_COLOR_TEMP.items()}
 HDR_TONE_MAPPING_UI_TO_MTK = {0: 5, 1: 0, 2: 2, 3: 1}
@@ -667,8 +668,14 @@ class Adb:
                 sd_size = int(sd_size_text)
             except Exception:
                 sd_size = 0
-            if sd_size < 1000:
-                local_jar = get_colorful_led_tool_path()
+            local_jar = get_colorful_led_tool_path()
+            local_size = 0
+            if local_jar:
+                try:
+                    local_size = os.path.getsize(local_jar)
+                except Exception:
+                    local_size = 0
+            if sd_size < 1000 or (local_size > 0 and sd_size != local_size):
                 if local_jar:
                     adb_run(["-s", f"{self.ip}:5555", "push", local_jar, "/sdcard/ColorfulLedTool.jar"], check=check)
                 else:
@@ -729,6 +736,58 @@ class Adb:
         v = log[i+2:].strip() if i >= 0 else "N/A"
         _adb_log(f"jni_get {key} => {v}")
         return v
+
+    def jni_batch_get(self, keys, check=False):
+        safe_keys = []
+        for key in keys:
+            key = str(key)
+            if key and all(ch.isalnum() or ch == "_" for ch in key):
+                safe_keys.append(key)
+        if not safe_keys:
+            return {}
+
+        with self.transaction():
+            jar = "/data/data/mitv.service/cache/MtkDirectTool.jar"
+            cmd_args = "".join([f"\\${{IFS}}{p}" for p in ["MtkDirectTool", "batchGet"] + safe_keys])
+            cmd = (
+                f"mkdir -p /sdcard/Download/Mimonitor_Toolbox; "
+                f"rm -f {MTK_BATCH_RESULT_FILE}; "
+                f'service call TvService 3 s16 "sh -c eval\\${{IFS}}CLASSPATH={jar}\\${{IFS}}/system/bin/app_process\\${{IFS}}/data/data/mitv.service/cache{cmd_args}" >/dev/null; '
+                f"i=0; while [ $i -lt 30 ] && [ ! -f {MTK_BATCH_RESULT_FILE} ]; do sleep 0.1; i=$((i+1)); done; "
+                f"cat {MTK_BATCH_RESULT_FILE} 2>/dev/null"
+            )
+            out = self.shell(cmd, check=check)
+
+        vals = {}
+        for line in out.splitlines():
+            line = line.strip()
+            if not line or line.startswith("__") or "=" not in line:
+                continue
+            key, raw = line.split("=", 1)
+            if raw.startswith("ERROR"):
+                continue
+            try:
+                vals[key] = int(raw)
+            except Exception:
+                vals[key] = raw
+        if check and not vals:
+            raise RuntimeError("未读取到批量 JNI 值")
+        _adb_log(f"jni_batch_get {','.join(safe_keys)} => {vals}")
+        return vals
+
+    def jni_batch_get_or_single(self, keys, check=False):
+        vals = self.jni_batch_get(keys)
+        for key in keys:
+            if key in vals:
+                continue
+            try:
+                vals[key] = int(self.jni_get(key, check=check))
+            except Exception:
+                if check:
+                    raise
+                pass
+        return vals
+
     def refresh_pq(self, check=False):
         _adb_log("refresh_pq")
         return self.shell("am broadcast -a com.xiaomi.mitv.action.PIC_MODE_CHANGED --ei picmode 7", check=check)
@@ -1390,10 +1449,10 @@ class App(FluentWindow):
                 lambda val, name: self._fsync(val == 1)
             ),
             "input_source_cycle": (
-                "tv_input_source_id",
+                "mitv.tvplayer.hdmi.last.source",
                 [(23, "HDMI 1"), (24, "HDMI 2"), (29, "DP"), (30, "USBC")],
                 "信号源切换",
-                lambda val, name: self._set("tv_input_source_id", val, f"信号源: {name}")
+                lambda val, name: self._set("mitv.tvplayer.hdmi.last.source", val, f"信号源: {name}")
             )
         }
         
@@ -1731,7 +1790,7 @@ class App(FluentWindow):
             v = self.adb.jni_get("g_video__vid_od_response_time", check=check)
             return as_int(v)
         elif sk == "freesync":
-            src = self.adb.get("tv_input_source_id", check=check)
+            src = self.adb.get("mitv.tvplayer.hdmi.last.source", check=check)
             src_id = as_int(src)
             if src_id in (29, 30):
                 fs = self.adb.jni_get("g_video__dp_adaptive_sync", check=check)
@@ -4783,45 +4842,44 @@ class App(FluentWindow):
                                         try: settings_vals[k] = int(v)
                                         except: settings_vals[k] = v
 
+                    jni_batch_vals = {}
+                    jni_keys = cfg.get("jni", [])
+                    if jni_keys:
+                        jni_batch_vals = self.adb.jni_batch_get_or_single(jni_keys)
+
                     # 读取 JNI 背光
-                    if "g_disp__disp_back_light" in cfg.get("jni", []):
-                        bl = self.adb.jni_get("g_disp__disp_back_light")
-                        try: jni_vals["g_disp__disp_back_light"] = int(bl)
-                        except: pass
+                    if "g_disp__disp_back_light" in jni_batch_vals:
+                        jni_vals["g_disp__disp_back_light"] = jni_batch_vals["g_disp__disp_back_light"]
 
                     # 读取 JNI 色域 (覆盖 settings 中的主键和旧 OSD 键)
-                    if "g_video__vid_gamut_mapping_mode" in cfg.get("jni", []):
-                        gamut = self.adb.jni_get("g_video__vid_gamut_mapping_mode")
+                    if "g_video__vid_gamut_mapping_mode" in jni_batch_vals:
                         try:
-                            gamut_val = int(gamut)
+                            gamut_val = int(jni_batch_vals["g_video__vid_gamut_mapping_mode"])
                             # MTK 值和 settings 值一致，直接覆盖
                             settings_vals["tv_picture_advanced_video_color_space"] = gamut_val
                             settings_vals["tv_picture_video_color_space"] = gamut_val
                         except: pass
 
                     # 读取 JNI 色温 (MTK 值需转换为小米 settings 枚举值)
-                    if "g_video__clr_temp" in cfg.get("jni", []):
-                        clr = self.adb.jni_get("g_video__clr_temp")
+                    if "g_video__clr_temp" in jni_batch_vals:
                         try:
-                            clr_val = int(clr)
+                            clr_val = int(jni_batch_vals["g_video__clr_temp"])
                             if clr_val in MTK_TO_XIAOMI_COLOR_TEMP:
                                 settings_vals["picture_color_temperature"] = MTK_TO_XIAOMI_COLOR_TEMP[clr_val]
                         except: pass
 
                     # 读取 JNI 控光 (覆盖官方主键和旧 OSD 键)
-                    if "g_video__vid_local_dimming" in cfg.get("jni", []):
-                        dim = self.adb.jni_get("g_video__vid_local_dimming")
+                    if "g_video__vid_local_dimming" in jni_batch_vals:
                         try:
-                            dim_val = int(dim)
+                            dim_val = int(jni_batch_vals["g_video__vid_local_dimming"])
                             settings_vals["picture_local_dimming"] = dim_val
                             settings_vals["tv_picture_video_local_dimming"] = dim_val
                         except: pass
 
                     # HDR 色调映射的 OSD 索引与 MTK 底层枚举不同。
-                    if "g_video__vid_hdr_tone_mapping_mode" in cfg.get("jni", []):
-                        tone = self.adb.jni_get("g_video__vid_hdr_tone_mapping_mode")
+                    if "g_video__vid_hdr_tone_mapping_mode" in jni_batch_vals:
                         try:
-                            tone_val = int(tone)
+                            tone_val = int(jni_batch_vals["g_video__vid_hdr_tone_mapping_mode"])
                             ui_val = HDR_TONE_MAPPING_MTK_TO_UI.get(tone_val)
                             settings_vals["picture_hdr_tone_mapping"] = tone_val
                             if ui_val is not None:
@@ -4832,18 +4890,34 @@ class App(FluentWindow):
                     if cfg.get("jni_mode"):
                         src = settings_vals.get("mitv.tvplayer.hdmi.last.source")
                         if src in (29, 30):
-                            edid = self.adb.jni_get("g_fusion_picture__dp_edid_version")
-                            try: jni_vals["mode_320"] = 1 if int(edid) == 3 else 0
+                            mode_vals = self.adb.jni_batch_get_or_single([
+                                "g_fusion_picture__dp_edid_version",
+                                "g_video__dp_adaptive_sync",
+                            ])
+                            try:
+                                jni_vals["mode_320"] = (
+                                    1 if int(mode_vals.get("g_fusion_picture__dp_edid_version")) == 3 else 0
+                                )
                             except: pass
-                            fs = self.adb.jni_get("g_video__dp_adaptive_sync")
-                            try: jni_vals["freesync"] = 1 if int(fs) == 1 else 0
+                            try:
+                                jni_vals["freesync"] = (
+                                    1 if int(mode_vals.get("g_video__dp_adaptive_sync")) == 1 else 0
+                                )
                             except: pass
                         else:
-                            edid = self.adb.jni_get("g_fusion_picture__hdmi_edid_version")
-                            try: jni_vals["mode_320"] = 1 if int(edid) == 6 else 0
+                            mode_vals = self.adb.jni_batch_get_or_single([
+                                "g_fusion_picture__hdmi_edid_version",
+                                "g_video__freesync_switch",
+                            ])
+                            try:
+                                jni_vals["mode_320"] = (
+                                    1 if int(mode_vals.get("g_fusion_picture__hdmi_edid_version")) == 6 else 0
+                                )
                             except: pass
-                            fs = self.adb.jni_get("g_video__freesync_switch")
-                            try: jni_vals["freesync"] = 1 if int(fs) == 3 else 0
+                            try:
+                                jni_vals["freesync"] = (
+                                    1 if int(mode_vals.get("g_video__freesync_switch")) == 3 else 0
+                                )
                             except: pass
 
                 if page_name == "picturePage" and refresh_seq != getattr(self, "_picture_mode_switch_seq", 0):
@@ -4859,6 +4933,7 @@ class App(FluentWindow):
                 loaded = True
                 self.log("页面数据刷新完成")
             except Exception as e:
+                self.log(f"页面数据刷新失败: {e}")
                 print(f"Page data refresh error: {e}")
             finally:
                 self.page_refresh_finished.emit(page_name, loaded)

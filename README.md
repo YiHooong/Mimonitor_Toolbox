@@ -55,7 +55,8 @@ service call TvService 3 s16 "sh -c eval\${IFS}CLASSPATH=/data/data/mitv.service
 service call TvService 3 s16 "sh -c eval\${IFS}CLASSPATH=...\${IFS}MtkDirectTool\${IFS}set\${IFS}g_disp__disp_back_light\${IFS}50\${IFS}3"
 ```
 
-读取结果通过 `logcat` 获取。
+单项兼容读取仍可通过 `logcat` 获取结果；页面刷新使用 `batchGet` 一次读取多个寄存器，
+结果写入 `/sdcard/Download/Mimonitor_Toolbox/.mtk_batch_result.txt` 后由桌面端解析。
 
 ### 数据加载策略
 
@@ -70,8 +71,8 @@ service call TvService 3 s16 "sh -c eval\${IFS}CLASSPATH=...\${IFS}MtkDirectTool
 
 首次连接时自动检测并补齐 `MtkDirectTool.jar` / `ColorfulLedTool.jar`：
 
-1. 检查设备 `/sdcard/` 是否已有 jar
-2. 没有则从本地 push 到 `/sdcard/`
+1. 检查设备 `/sdcard/` 中的 jar 大小是否与本地一致
+2. 缺失或大小不一致时从本地 push 到 `/sdcard/`
 3. 从 `/sdcard/` 复制到 `/data/data/mitv.service/cache/`
 
 打包后 jar 会从 `assets/runtime/` 嵌入 exe 中（PyInstaller `--add-binary`）。

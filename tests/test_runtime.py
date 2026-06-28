@@ -420,6 +420,11 @@ class StateMachineTests(unittest.TestCase):
                     raise AssertionError("JNI read escaped the page transaction")
                 return "40"
 
+            def jni_batch_get_or_single(self, keys):
+                if self.depth != 1:
+                    raise AssertionError("JNI read escaped the page transaction")
+                return {key: 40 for key in keys}
+
         class FakeApp:
             adb_connected = True
             _picture_mode_switch_seq = 0
@@ -451,6 +456,23 @@ class StateMachineTests(unittest.TestCase):
         self.assertIn(("values", ({"picture_mode": 2},)), emitted)
         self.assertIn(("jni", ({"g_disp__disp_back_light": 40},)), emitted)
         self.assertIn(("finished", ("picturePage", True)), emitted)
+
+    def test_jni_batch_get_falls_back_for_missing_keys(self):
+        calls = []
+
+        class FakeAdb:
+            def jni_batch_get(self, keys):
+                calls.append(("batch", tuple(keys)))
+                return {"a": 1}
+
+            def jni_get(self, key, check=False):
+                calls.append(("single", key, check))
+                return "2"
+
+        fake = FakeAdb()
+        vals = app.Adb.jni_batch_get_or_single(fake, ["a", "b"])
+        self.assertEqual(vals, {"a": 1, "b": 2})
+        self.assertEqual(calls, [("batch", ("a", "b")), ("single", "b", False)])
 
 
 if __name__ == "__main__":
