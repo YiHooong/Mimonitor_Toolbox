@@ -110,6 +110,26 @@ class AdbRuntimeTests(unittest.TestCase):
             ["-s", "192.168.5.205:5555", "get-state"],
         ])
 
+    def test_adb_ensure_connected_reconnects_stale_device(self):
+        calls = []
+
+        def fake_adb_run(args, timeout=10, check=False):
+            calls.append((args, timeout, check))
+            if args[0] == "connect":
+                return "connected to 192.168.5.205:5555"
+            if args[-1] == "get-state":
+                return "offline" if len([c for c in calls if c[0][-1] == "get-state"]) == 1 else "device"
+            return ""
+
+        with mock.patch.object(app, "adb_run", side_effect=fake_adb_run):
+            self.assertEqual(app.Adb("192.168.5.205").ensure_connected(), (True, "device"))
+
+        self.assertEqual(calls, [
+            (["-s", "192.168.5.205:5555", "get-state"], 2, False),
+            (["connect", "192.168.5.205:5555"], 5, False),
+            (["-s", "192.168.5.205:5555", "get-state"], 3, False),
+        ])
+
     def test_connected_status_with_adb_error_is_normalized(self):
         text = "已连接: adb.exe: device offline"
         self.assertFalse(app.is_connected_status_text(text))
@@ -226,6 +246,68 @@ class AdbRuntimeTests(unittest.TestCase):
         self.assertEqual(len(messages), 1)
         self.assertEqual(hud, [("ADB 进程", "正在重启")])
         self.assertEqual(logs, ["检测到 ADB 进程被杀死，正在重启"])
+
+    def test_adb_action_self_heals_before_operation(self):
+        events = []
+        operation_calls = []
+
+        class FakeSignal:
+            def emit(self, *args):
+                events.append(args)
+
+        class FakeAdb:
+            ip = "192.168.5.205"
+
+            def ensure_connected(self):
+                events.append(("ensure",))
+                return True, "device"
+
+        class FakeApp:
+            _cleanup_done = False
+            adb_connected = True
+            adb = FakeAdb()
+            adb_action_finished = FakeSignal()
+            status_signal = FakeSignal()
+
+        def operation():
+            operation_calls.append("run")
+
+        with mock.patch.object(app, "async_run", side_effect=lambda fn: fn()):
+            app.App._run_adb_action(FakeApp(), "测试操作", operation)
+
+        self.assertEqual(operation_calls, ["run"])
+        self.assertEqual(events, [("ensure",), ({"label": "测试操作", "on_success": None, "on_failure": None}, True, "")])
+
+    def test_adb_action_reports_disconnected_when_self_heal_fails(self):
+        events = []
+        operation_calls = []
+
+        class FakeSignal:
+            def emit(self, *args):
+                events.append(args)
+
+        class FakeAdb:
+            ip = "192.168.5.205"
+
+            def ensure_connected(self):
+                return False, "offline"
+
+        class FakeApp:
+            _cleanup_done = False
+            adb_connected = True
+            adb = FakeAdb()
+            adb_action_finished = FakeSignal()
+            status_signal = FakeSignal()
+
+        def operation():
+            operation_calls.append("run")
+
+        with mock.patch.object(app, "async_run", side_effect=lambda fn: fn()):
+            app.App._run_adb_action(FakeApp(), "测试操作", operation)
+
+        self.assertEqual(operation_calls, [])
+        self.assertEqual(events[0], ("未连接（设备离线）",))
+        self.assertFalse(events[1][1])
 
 
 class SettingsTests(unittest.TestCase):
@@ -511,6 +593,32 @@ class StateMachineTests(unittest.TestCase):
 
         app.App.on_tray_activated(FakeApp(), app.QSystemTrayIcon.ActivationReason.Trigger)
         self.assertEqual(calls, ["show"])
+
+    def test_restore_checks_adb_when_connected(self):
+        calls = []
+
+        class FakeApp:
+            adb_connected = True
+            adb = type("FakeAdb", (), {"ip": "192.168.5.205"})()
+
+            def _keep_adb_alive(self):
+                calls.append("keepalive")
+
+        app.App._check_adb_when_restored(FakeApp())
+        self.assertEqual(calls, ["keepalive"])
+
+    def test_restore_does_not_check_adb_when_disconnected(self):
+        calls = []
+
+        class FakeApp:
+            adb_connected = False
+            adb = type("FakeAdb", (), {"ip": "192.168.5.205"})()
+
+            def _keep_adb_alive(self):
+                calls.append("keepalive")
+
+        app.App._check_adb_when_restored(FakeApp())
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

@@ -688,6 +688,16 @@ class Adb:
         serial = f"{self.ip}:5555"
         o = adb_run(["connect", serial])
         return adb_connect_output_ok(o) and self.device_state(timeout=3) == "device"
+    def ensure_connected(self):
+        if not self.ip:
+            return False, "unknown"
+        serial = f"{self.ip}:5555"
+        state = adb_device_state(serial, timeout=2)
+        if state == "device":
+            return True, state
+        adb_run(["connect", serial], timeout=5)
+        state = adb_device_state(serial, timeout=3)
+        return state == "device", state
     def device_state(self, timeout=3):
         if not self.ip:
             return "unknown"
@@ -1267,6 +1277,11 @@ class App(FluentWindow):
         self._restore_main_window()
         QTimer.singleShot(0, self._restore_main_window)
         QTimer.singleShot(120, self._restore_main_window)
+        QTimer.singleShot(250, self._check_adb_when_restored)
+
+    def _check_adb_when_restored(self):
+        if getattr(self, "adb_connected", False) and getattr(self.adb, "ip", ""):
+            self._keep_adb_alive()
 
     def _restore_main_window(self):
         state = self.windowState()
@@ -4340,6 +4355,11 @@ class App(FluentWindow):
 
         def do():
             try:
+                if getattr(self, "adb_connected", False) and self.adb.ip:
+                    ok, state = self.adb.ensure_connected()
+                    if not ok:
+                        self.status_signal.emit(disconnected_status_text(state))
+                        raise RuntimeError(f"ADB 连接已断开（{adb_device_state_label(state)}）")
                 operation()
                 self.adb_action_finished.emit(context, True, "")
             except Exception as e:
