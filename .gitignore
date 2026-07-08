@@ -1,4 +1,5 @@
 __pycache__/
+.ruff_cache/
 tests/
 *.pyc
 dist/

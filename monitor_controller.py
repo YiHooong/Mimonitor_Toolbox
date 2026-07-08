@@ -8,6 +8,21 @@ import threading
 import time
 import ctypes
 import tempfile
+import json
+
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer, QEasingCurve, QPropertyAnimation
+from PyQt6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QPen
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QFrame, QVBoxLayout, QHBoxLayout,
+    QGridLayout, QSizePolicy, QFileDialog, QTextEdit,
+    QSystemTrayIcon, QMenu, QDialog, QGraphicsDropShadowEffect, QLabel
+)
+from qfluentwidgets import (
+    FluentWindow, PushButton, PrimaryPushButton, ToggleButton, Slider, ComboBox, LineEdit,
+    ScrollArea, BodyLabel, SubtitleLabel, TitleLabel, SimpleCardWidget,
+    FluentIcon as FIF, MessageBox, Theme, setTheme, CheckBox, IconWidget
+)
 
 # Native Windows Hotkey support variables
 user32 = None
@@ -27,23 +42,8 @@ if sys.platform == "win32":
         user32 = ctypes.windll.user32
     except Exception as e:
         print(f"Failed to load user32: {e}")
-from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer, QEasingCurve, QPropertyAnimation
-from PyQt6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QPen
-from PyQt6.QtNetwork import QLocalServer, QLocalSocket
-from PyQt6.QtWidgets import (
-    QApplication, QWidget, QFrame, QVBoxLayout, QHBoxLayout,
-    QGridLayout, QSizePolicy, QFileDialog, QTextEdit,
-    QSystemTrayIcon, QMenu, QDialog, QGraphicsDropShadowEffect, QLabel
-)
-from qfluentwidgets import (
-    FluentWindow, PushButton, PrimaryPushButton, ToggleButton, Slider, ComboBox, LineEdit,
-    ScrollArea, BodyLabel, SubtitleLabel, TitleLabel, SimpleCardWidget,
-    FluentIcon as FIF, MessageBox, Theme, setTheme, CheckBox, IconWidget
-)
 
 NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
-
-import json
 
 _settings_lock = threading.RLock()
 
@@ -61,6 +61,10 @@ def get_settings_path():
     folder = get_app_data_dir()
     return os.path.join(folder, "config.json")
 
+def get_log_dir():
+    """日志目录，跟随配置放在用户可写的 app-data 下（避免 exe 装在无写权限目录时失败）"""
+    return os.path.join(get_app_data_dir(), "logs")
+
 def _load_settings_unlocked():
     defaults = {
         "close_behavior": "tray",
@@ -69,6 +73,8 @@ def _load_settings_unlocked():
         "hdr_sdr_local_dimming_enabled": False,
         "local_dimming_memory": {"sdr": None, "hdr": None},
         "local_dimming_toggle_last_value": 3,
+        "freesync_mode_memory_enabled": False,
+        "freesync_previous_mode": None,
     }
     path = get_settings_path()
     data = {}
@@ -133,7 +139,7 @@ def get_local_subnet():
         ip = s.getsockname()[0]
         s.close()
         return ".".join(ip.split(".")[:3])
-    except:
+    except OSError:
         return "192.168.1"
 
 
@@ -557,7 +563,7 @@ def _adb_log(msg):
         try:
             _log_file.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
             _log_file.flush()
-        except: pass
+        except Exception: pass
 
 def adb_run(args, timeout=10, check=False):
     proc = None
@@ -590,7 +596,7 @@ def adb_run(args, timeout=10, check=False):
                     pass
             _adb_log(f"{adb_command_text(args)} => TIMEOUT")
             if check:
-                raise RuntimeError(f"ADB 命令超时（{timeout} 秒）")
+                raise RuntimeError(f"ADB 命令超时（{timeout} 秒）") from None
             return ""
         except Exception as e:
             _adb_log(f"{adb_command_text(args)} => ERROR: {e}")
@@ -829,7 +835,7 @@ def scan_adb(base="192.168.5", cb=None, log=None):
                     if cb: cb(ip, m)
             else:
                 s.close()
-        except:
+        except Exception:
             pass
 
     if log: log(f"[扫描] 开始 {base}.1~254")
@@ -1159,7 +1165,7 @@ class App(FluentWindow):
 
         # 初始化日志文件路径（等用户开启时再创建文件）
         global _log_path
-        _log_path = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "logs", f"log_{time.strftime('%Y%m%d_%H%M%S')}.txt")
+        _log_path = os.path.join(get_log_dir(), f"log_{time.strftime('%Y%m%d_%H%M%S')}.txt")
         self.is_forcing_exit = False
         self.page_status_indicators = []
         self.adb_connected = False
@@ -1231,6 +1237,7 @@ class App(FluentWindow):
         self.hdr_memory_timer.timeout.connect(lambda: self._poll_hdr_memory_state("timer"))
         self.hdr_memory_timer.start()
         QTimer.singleShot(0, self._update_hdr_memory_status_label)
+        QTimer.singleShot(0, self._update_freesync_memory_status_label)
         QTimer.singleShot(900, self._auto_connect_on_startup)
         QApplication.instance().aboutToQuit.connect(self.cleanup_before_exit)
 
@@ -1419,9 +1426,6 @@ class App(FluentWindow):
         if not getattr(self, "adb_connected", False):
             return
             
-        if not hasattr(self, "pending_notifications"):
-            self.pending_notifications = {}
-
         if action == "local_dimming_toggle_off":
             self._toggle_local_dimming_off_hotkey()
             return
@@ -1482,7 +1486,7 @@ class App(FluentWindow):
         original_value = pending.get("original") if pending else curr_val
 
         curr_idx = -1
-        for idx, (val, name) in enumerate(state_tuples):
+        for idx, (val, _name) in enumerate(state_tuples):
             if val == curr_val:
                 curr_idx = idx
                 break
@@ -1792,7 +1796,7 @@ class App(FluentWindow):
                 return int(value)
             except Exception:
                 if check:
-                    raise RuntimeError(f"{sk} 返回了无效值：{value}")
+                    raise RuntimeError(f"{sk} 返回了无效值：{value}") from None
                 return fallback
 
         if sk in ("picture_local_dimming", "tv_picture_video_local_dimming"):
@@ -1842,6 +1846,55 @@ class App(FluentWindow):
         else:
             self.log("HDR/SDR 分区控光记忆: 关闭")
             self._update_hdr_memory_status_label()
+
+    def _freesync_mode_memory_enabled(self):
+        return bool(load_settings().get("freesync_mode_memory_enabled", False))
+
+    def _picture_mode_display_name(self, mode):
+        try:
+            mode_int = int(mode)
+        except (TypeError, ValueError):
+            return str(mode)
+        group_name = self._picture_mode_group_name(mode_int)
+        if group_name:
+            return f"{group_name}（{mode_int}）"
+        return f"{PICTURE_SCENE_NAMES.get(mode_int, '未知场景')}（{mode_int}）"
+
+    def _get_freesync_memory_mode(self):
+        try:
+            return int(load_settings().get("freesync_previous_mode"))
+        except (TypeError, ValueError):
+            return None
+
+    def _remember_freesync_previous_mode(self):
+        """记录 FreeSync 开启前的画面模式（开启后显示器会自动切到游戏模式）"""
+        try:
+            mode = int(self.current_vals.get("picture_mode"))
+        except (TypeError, ValueError):
+            return
+        update_settings({"freesync_previous_mode": mode})
+        self._update_freesync_memory_status_label()
+        self.log(f"FreeSync 模式记忆: 记录开启前模式 {self._picture_mode_display_name(mode)}")
+
+    def _toggle_freesync_mode_memory(self, state):
+        try:
+            state_val = int(state)
+        except Exception:
+            state_val = getattr(state, "value", 0)
+        enabled = state_val == Qt.CheckState.Checked.value
+        update_settings({"freesync_mode_memory_enabled": enabled})
+        self.log(f"FreeSync Pro 模式记忆: {'开启' if enabled else '关闭'}")
+        self._update_freesync_memory_status_label()
+
+    def _update_freesync_memory_status_label(self):
+        label = getattr(self, "freesync_memory_status_label", None)
+        if not label:
+            return
+        enabled = self._freesync_mode_memory_enabled()
+        mode = self._get_freesync_memory_mode()
+        mode_text = self._picture_mode_display_name(mode) if mode is not None else "--"
+        prefix = "已开启" if enabled else "已关闭"
+        label.setText(f"FreeSync 模式记忆：{prefix}，记录的开启前模式：{mode_text}（关闭 FreeSync 后自动切回）")
 
     def _mark_adb_busy(self, seconds=2.0):
         self._adb_busy_until = max(getattr(self, "_adb_busy_until", 0.0), time.monotonic() + seconds)
@@ -2115,22 +2168,6 @@ class App(FluentWindow):
             state_name = "HDR" if bucket == "hdr" else "SDR"
             self.log(f"已记忆 {state_name} 精密控光: {LOCAL_DIMMING_NAMES.get(value, value)}")
 
-    def _check_pending_notifications(self, new_vals):
-        if not hasattr(self, "pending_notifications"):
-            return
-        for key, (target_val, feature_name, value_name) in list(self.pending_notifications.items()):
-            if key in new_vals and str(new_vals[key]) == str(target_val):
-                if getattr(self, "osd", None) and not self.osd.isVisible():
-                    self.osd.show_hud(feature_name, value_name)
-                elif not getattr(self, "osd", None):
-                    self.tray_icon.showMessage(
-                        "红米 G Pro 27U Toolbox",
-                        f"{feature_name} 已成功设置为：{value_name}",
-                        QSystemTrayIcon.MessageIcon.Information,
-                        2500
-                    )
-                del self.pending_notifications[key]
-
     def _monitor_adb_server(self):
         if getattr(self, "_cleanup_done", False) or getattr(self, "_windows_session_ending", False):
             return
@@ -2354,18 +2391,28 @@ class App(FluentWindow):
             try:
                 _log_file.write(text + "\n")
                 _log_file.flush()
-            except: pass
+            except Exception: pass
 
     def _toggle_log_file(self, state):
         global _log_to_file_enabled, _log_file
         _log_to_file_enabled = (state == 2)
         if _log_to_file_enabled and not _log_file:
-            os.makedirs(os.path.dirname(_log_path), exist_ok=True)
-            _log_file = open(_log_path, "a", encoding="utf-8")
-            _log_file.write(f"{'='*60}\n")
-            _log_file.write(f"红米 G Pro 27U Toolbox 日志 - {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            _log_file.write(f"{'='*60}\n")
-            _log_file.flush()
+            try:
+                os.makedirs(os.path.dirname(_log_path), exist_ok=True)
+                _log_file = open(_log_path, "a", encoding="utf-8")
+                _log_file.write(f"{'='*60}\n")
+                _log_file.write(f"红米 G Pro 27U Toolbox 日志 - {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                _log_file.write(f"{'='*60}\n")
+                _log_file.flush()
+            except OSError as e:
+                # 目录不可写（如安装到 Program Files）等情况：回退开关，不让异常冒泡到 Qt 槽
+                _log_to_file_enabled = False
+                _log_file = None
+                self.log_file_toggle.blockSignals(True)
+                self.log_file_toggle.setChecked(False)
+                self.log_file_toggle.blockSignals(False)
+                self.log(f"无法创建日志文件（目录不可写: {os.path.dirname(_log_path)}）: {e}")
+                return
         self.log(f"本地日志记录: {'开启' if _log_to_file_enabled else '关闭'}")
 
     def _toggle_autostart(self, state):
@@ -2399,7 +2446,7 @@ class App(FluentWindow):
                 with open(path, "w") as f:
                     f.write(f'start /min "" "{exe}" --minimized\n')
             else:
-                with open(path, "w") as f:
+                with open(path, "w", encoding="utf-8") as f:
                     f.write(f"[Desktop Entry]\nType=Application\nName=RedmiToolbox\nExec=python3 {exe} --minimized\nX-GNOME-Autostart-enabled=true\n")
                 os.chmod(path, 0o755)
         except Exception as e:
@@ -2484,7 +2531,12 @@ class App(FluentWindow):
                 self.log(f"导出失败: {e}")
 
     def _open_log_dir(self):
-        log_dir = os.path.dirname(_log_path) if _log_path else os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "logs")
+        log_dir = os.path.dirname(_log_path) if _log_path else get_log_dir()
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+        except OSError as e:
+            self.log(f"无法创建日志目录: {e}")
+            return
         if sys.platform == "win32":
             os.startfile(log_dir)
         elif sys.platform == "darwin":
@@ -2509,6 +2561,8 @@ class App(FluentWindow):
             page = self.stackedWidget.currentWidget()
             if page:
                 self._on_page_changed(self.stackedWidget.currentIndex())
+            # 连接后预加载画面页与游戏页数据（无论当前停在哪一页），切换过去时无需再等读取
+            self._refresh_pages(("picturePage", "gamePage"), delay_ms=800)
             # 检测 4K 状态
             QTimer.singleShot(1500, self._check_4k_state)
             # 首次连接后同步 ADB 保活守护状态，工具页卡片不需要再手动点检测
@@ -3200,6 +3254,19 @@ class App(FluentWindow):
         self.hdr_memory_status_label = BodyLabel("当前信号：未检测", card3)
         self.hdr_memory_status_label.setStyleSheet("color: rgba(255, 255, 255, 0.55); font-size: 12px;")
         c3_lay.addWidget(self.hdr_memory_status_label)
+
+        freesync_memory_layout = QHBoxLayout()
+        freesync_memory_layout.setSpacing(15)
+        self.chk_freesync_mode_memory = CheckBox("FreeSync Pro 模式记忆", card3)
+        self.chk_freesync_mode_memory.setChecked(settings.get("freesync_mode_memory_enabled", False))
+        self.chk_freesync_mode_memory.stateChanged.connect(self._toggle_freesync_mode_memory)
+        freesync_memory_layout.addWidget(self.chk_freesync_mode_memory)
+        freesync_memory_layout.addStretch()
+        c3_lay.addLayout(freesync_memory_layout)
+
+        self.freesync_memory_status_label = BodyLabel("FreeSync 模式记忆：未启用", card3)
+        self.freesync_memory_status_label.setStyleSheet("color: rgba(255, 255, 255, 0.55); font-size: 12px;")
+        c3_lay.addWidget(self.freesync_memory_status_label)
 
         grid.addWidget(card3, 2, 0, 1, 2)
 
@@ -4228,6 +4295,8 @@ class App(FluentWindow):
             self.log(f"320Hz: {'开' if on else '关'}")
             self.current_vals["mode_320"] = 1 if on else 0
             self._optimistic_highlight("mode_320", 1 if on else 0)
+            # 切换 EDID 版本会连带影响刷新率 / FreeSync / 画面参数，延迟刷新画面页和游戏页以回读真实值
+            self._refresh_pages(("picturePage", "gamePage"), delay_ms=1500, force=True)
 
         def failure():
             if previous is not None:
@@ -4240,17 +4309,36 @@ class App(FluentWindow):
         self._mark_adb_busy(2.5)
         previous = self._take_control_previous("freesync")
 
+        # FreeSync Pro 模式记忆：开启前记录画面模式，关闭时切回（开启后显示器会自动切到游戏模式）
+        restore_mode = None
+        if self._freesync_mode_memory_enabled():
+            if on:
+                # 仅在从关到开时记录，避免重复开启把记忆覆盖成游戏模式
+                if self.current_vals.get("freesync") != 1:
+                    self._remember_freesync_previous_mode()
+            elif self.current_vals.get("freesync") == 1:
+                restore_mode = self._get_freesync_memory_mode()
+
         def operation():
             with self.adb.transaction():
                 src = self._get_input_source(check=True)
                 if src in ("29","30"): self.adb.jni_set("g_video__dp_adaptive_sync", 1 if on else 0, check=True)
                 else: self.adb.jni_set("g_video__freesync_switch", 3 if on else 0, check=True)
+                # 关闭 FreeSync 且开启模式记忆：先切回开启前的画面模式，再刷新数据（切换早于刷新）
+                if not on and restore_mode is not None:
+                    self.adb.put("picture_mode", str(restore_mode), check=True)
                 self.adb.refresh_pq(check=True)
 
         def success():
             self.log(f"FreeSync: {'开' if on else '关'}")
             self.current_vals["freesync"] = 1 if on else 0
             self._optimistic_highlight("freesync", 1 if on else 0)
+            if not on and restore_mode is not None:
+                self.current_vals["picture_mode"] = restore_mode
+                self._highlight_mode(restore_mode)
+                self.log(f"FreeSync 模式记忆: 已切回 {self._picture_mode_display_name(restore_mode)}")
+            # FreeSync 改的是 adaptive sync / EDID 相关开关，开关后刷新画面页和游戏页以回读真实值
+            self._refresh_pages(("picturePage", "gamePage"), delay_ms=1500, force=True)
 
         def failure():
             if previous is not None:
@@ -4261,7 +4349,7 @@ class App(FluentWindow):
     def _screen_light_int(self, key, default):
         try:
             return int(self.current_vals.get(key, default))
-        except:
+        except (TypeError, ValueError):
             return default
 
     def _commit_screen_light(self, message, updates):
@@ -4486,7 +4574,7 @@ class App(FluentWindow):
         for ip, model in dev_list:
             self.dev_combo.addItem(f"{model} ({ip})")
         preferred_index = 0
-        for i, (ip, model) in enumerate(dev_list):
+        for i, (_ip, model) in enumerate(dev_list):
             if "mitv" in str(model).lower():
                 preferred_index = i
                 break
@@ -4751,7 +4839,6 @@ class App(FluentWindow):
         # settings 中的 picture_color_temperature 已经是小米层枚举值；
         # 只有 JNI 的 g_video__clr_temp 读数才需要从 MTK 枚举转换。
         self.current_vals.update(vals)
-        self._check_pending_notifications(vals)
         slider_mappings = {
             "picture_backlight": "backlight",
             "xiaomi_picture_backlight": "backlight",
@@ -4794,7 +4881,6 @@ class App(FluentWindow):
 
     def _apply_polled_jni_values(self, vals):
         self.current_vals.update(vals)
-        self._check_pending_notifications(vals)
         if "g_disp__disp_back_light" in vals and "backlight" in self.sliders:
             val = vals["g_disp__disp_back_light"]
             slider, label_widget = self.sliders["backlight"]
@@ -4860,7 +4946,7 @@ class App(FluentWindow):
                                     k, v = parts[0], parts[1]
                                     if v not in ("", "null", "N/A"):
                                         try: settings_vals[k] = int(v)
-                                        except: settings_vals[k] = v
+                                        except (TypeError, ValueError): settings_vals[k] = v
 
                     jni_batch_vals = {}
                     jni_keys = cfg.get("jni", [])
@@ -4878,7 +4964,7 @@ class App(FluentWindow):
                             # MTK 值和 settings 值一致，直接覆盖
                             settings_vals["tv_picture_advanced_video_color_space"] = gamut_val
                             settings_vals["tv_picture_video_color_space"] = gamut_val
-                        except: pass
+                        except (TypeError, ValueError): pass
 
                     # 读取 JNI 色温 (MTK 值需转换为小米 settings 枚举值)
                     if "g_video__clr_temp" in jni_batch_vals:
@@ -4886,7 +4972,7 @@ class App(FluentWindow):
                             clr_val = int(jni_batch_vals["g_video__clr_temp"])
                             if clr_val in MTK_TO_XIAOMI_COLOR_TEMP:
                                 settings_vals["picture_color_temperature"] = MTK_TO_XIAOMI_COLOR_TEMP[clr_val]
-                        except: pass
+                        except (TypeError, ValueError): pass
 
                     # 读取 JNI 控光 (覆盖官方主键和旧 OSD 键)
                     if "g_video__vid_local_dimming" in jni_batch_vals:
@@ -4894,7 +4980,7 @@ class App(FluentWindow):
                             dim_val = int(jni_batch_vals["g_video__vid_local_dimming"])
                             settings_vals["picture_local_dimming"] = dim_val
                             settings_vals["tv_picture_video_local_dimming"] = dim_val
-                        except: pass
+                        except (TypeError, ValueError): pass
 
                     # HDR 色调映射的 OSD 索引与 MTK 底层枚举不同。
                     if "g_video__vid_hdr_tone_mapping_mode" in jni_batch_vals:
@@ -4904,7 +4990,7 @@ class App(FluentWindow):
                             settings_vals["picture_hdr_tone_mapping"] = tone_val
                             if ui_val is not None:
                                 settings_vals["settings_display_hdr_color_tone"] = ui_val
-                        except: pass
+                        except (TypeError, ValueError): pass
 
                     # 读取 JNI 模式 (game page)
                     if cfg.get("jni_mode"):
@@ -4918,12 +5004,12 @@ class App(FluentWindow):
                                 jni_vals["mode_320"] = (
                                     1 if int(mode_vals.get("g_fusion_picture__dp_edid_version")) == 3 else 0
                                 )
-                            except: pass
+                            except (TypeError, ValueError): pass
                             try:
                                 jni_vals["freesync"] = (
                                     1 if int(mode_vals.get("g_video__dp_adaptive_sync")) == 1 else 0
                                 )
-                            except: pass
+                            except (TypeError, ValueError): pass
                         else:
                             mode_vals = self.adb.jni_batch_get_or_single([
                                 "g_fusion_picture__hdmi_edid_version",
@@ -4933,12 +5019,12 @@ class App(FluentWindow):
                                 jni_vals["mode_320"] = (
                                     1 if int(mode_vals.get("g_fusion_picture__hdmi_edid_version")) == 6 else 0
                                 )
-                            except: pass
+                            except (TypeError, ValueError): pass
                             try:
                                 jni_vals["freesync"] = (
                                     1 if int(mode_vals.get("g_video__freesync_switch")) == 3 else 0
                                 )
-                            except: pass
+                            except (TypeError, ValueError): pass
 
                 if page_name == "picturePage" and refresh_seq != getattr(self, "_picture_mode_switch_seq", 0):
                     self.log("已丢弃过期的画面设置刷新结果")
@@ -5003,6 +5089,32 @@ class App(FluentWindow):
     def _force_refresh_page(self, page_name):
         self._page_loaded.discard(page_name)
         self._refresh_page_data(page_name)
+
+    def _refresh_pages(self, page_names, delay_ms=0, force=False):
+        """刷新多个页面数据。
+
+        force=True：立即清缓存并强制回读（用于设置改动后同步真实值，
+        立即清缓存可避免延迟窗口内切过去看到旧值）；
+        force=False：只加载尚未加载 / 未在加载中的页面（用于连接后预加载，
+        不会与当前页已触发的加载重复）。
+        """
+        if force:
+            for page_name in page_names:
+                self._page_loaded.discard(page_name)
+
+        def do_refresh():
+            if not getattr(self, "adb_connected", False):
+                return
+            for page_name in page_names:
+                if force:
+                    self._force_refresh_page(page_name)
+                elif page_name not in self._page_loaded and page_name not in self._page_loading:
+                    self._refresh_page_data(page_name)
+
+        if delay_ms > 0:
+            QTimer.singleShot(delay_ms, do_refresh)
+        else:
+            do_refresh()
 
 
 if __name__ == "__main__":
