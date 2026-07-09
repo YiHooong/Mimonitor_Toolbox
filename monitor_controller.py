@@ -1953,7 +1953,12 @@ class App(FluentWindow):
             return
         state = windows_state
 
-        changed = state != getattr(self, "_hdr_last_state", None)
+        previous = getattr(self, "_hdr_last_state", None)
+        # previous 为 None 表示连接/启动后的首次检测：只是确立基线，并非真正的 HDR 切换。
+        # 首次检测是否会走到“已连接”分支取决于轮询与连接完成的时序，之前靠这个竞争来决定
+        # 要不要刷新，很不稳定；这里显式区分基线与真实切换，让行为确定。
+        is_baseline = previous is None
+        changed = state != previous
         self._hdr_last_state = state
         self._hdr_state_source = "Windows"
         self._update_hdr_memory_status_label(source)
@@ -1964,16 +1969,23 @@ class App(FluentWindow):
             memory_enabled = self._hdr_memory_enabled()
             if memory_enabled:
                 self._schedule_hdr_memory_apply(delay_ms=120)
-            self._schedule_picture_refresh_after_hdr_change(
-                state,
-                initial_delay_ms=300 if memory_enabled else 0,
-            )
+            # 首次基线检测不当作“切换”：连接时已加载/预加载画面页，无需重复刷新。
+            # 仅在真实切换(SDR↔HDR)、或开启记忆需要回读已应用结果时才刷新。
+            if not is_baseline or memory_enabled:
+                self._schedule_picture_refresh_after_hdr_change(
+                    state,
+                    initial_delay_ms=300 if memory_enabled else 0,
+                    is_switch=not is_baseline,
+                )
 
-    def _schedule_picture_refresh_after_hdr_change(self, state, initial_delay_ms=0):
+    def _schedule_picture_refresh_after_hdr_change(self, state, initial_delay_ms=0, is_switch=True):
         if not getattr(self, "adb_connected", False):
             return
         state_name = "HDR" if state else "SDR"
-        self.log(f"检测到 Windows HDR 切换为 {state_name}，刷新画面数据...")
+        if is_switch:
+            self.log(f"检测到 Windows HDR 切换为 {state_name}，刷新画面数据...")
+        else:
+            self.log(f"检测到当前 Windows 为 {state_name}，应用 HDR 记忆并刷新画面数据...")
         self._page_loaded.discard("picturePage")
         QTimer.singleShot(initial_delay_ms, lambda: self._refresh_picture_data_after_hdr_change())
         timer = getattr(self, "_hdr_picture_refresh_timer", None)

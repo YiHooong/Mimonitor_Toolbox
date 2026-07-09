@@ -442,13 +442,14 @@ class StateMachineTests(unittest.TestCase):
             def _schedule_hdr_memory_apply(self, delay_ms=250):
                 calls.append(("apply", delay_ms))
 
-            def _schedule_picture_refresh_after_hdr_change(self, state, initial_delay_ms=0):
-                calls.append(("refresh", state, initial_delay_ms))
+            def _schedule_picture_refresh_after_hdr_change(self, state, initial_delay_ms=0, is_switch=True):
+                calls.append(("refresh", state, initial_delay_ms, is_switch))
 
         fake = FakeApp()
         app.App._reconcile_hdr_memory_state(fake, "Windows HDR")
         self.assertEqual(fake._hdr_last_state, True)
-        self.assertEqual(calls[1:], [("apply", 120), ("refresh", True, 300)])
+        # 真实切换(SDR->HDR)：应用记忆在前、刷新在后，且标记为切换
+        self.assertEqual(calls[1:], [("apply", 120), ("refresh", True, 300, True)])
 
     def test_page_refresh_cleanup_updates_state_in_slot(self):
         hidden = []
