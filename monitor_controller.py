@@ -1057,6 +1057,14 @@ class LoadingSpinner(QWidget):
         painter.drawArc(rect, self._angle * 16, -115 * 16)
 
 
+class PageScrollSlider(Slider):
+    """横向数值条：忽略滚轮改值，把滚轮交给外层 ScrollArea 滚动页面。"""
+
+    def wheelEvent(self, event):
+        # 不 accept：事件继续向上传递，页面仍可滚动；也不改 slider 数值。
+        event.ignore()
+
+
 class InstallProgressDialog(QDialog):
     def __init__(self, apk_name, parent=None):
         super().__init__(parent)
@@ -3786,7 +3794,7 @@ class App(FluentWindow):
         name_label.setFixedWidth(100)
         layout.addWidget(name_label)
 
-        slider = Slider(Qt.Orientation.Horizontal, card)
+        slider = PageScrollSlider(Qt.Orientation.Horizontal, card)
         slider.setRange(lo, hi)
         slider.setValue(default)
         layout.addWidget(slider)
@@ -3835,7 +3843,7 @@ class App(FluentWindow):
         name_label.setFixedWidth(100)
         layout.addWidget(name_label)
 
-        slider = Slider(Qt.Orientation.Horizontal, card)
+        slider = PageScrollSlider(Qt.Orientation.Horizontal, card)
         slider.setRange(524, 1524)
         slider.setValue(1024)
         layout.addWidget(slider)
@@ -3870,7 +3878,7 @@ class App(FluentWindow):
         name_label.setFixedWidth(100)
         layout.addWidget(name_label)
 
-        slider = Slider(Qt.Orientation.Horizontal, card)
+        slider = PageScrollSlider(Qt.Orientation.Horizontal, card)
         slider.setRange(lo, hi)
         slider.setValue(default)
         layout.addWidget(slider)
