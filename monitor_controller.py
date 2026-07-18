@@ -942,8 +942,8 @@ class OsdHud(QWidget):
     def hide_smooth(self):
         self.anim.stop()
         try:
-            self.anim.finished.disconnect()
-        except Exception:
+            self.anim.finished.disconnect(self.hide)
+        except (TypeError, RuntimeError):
             pass
         self.anim.setStartValue(self.windowOpacity())
         self.anim.setEndValue(0.0)
@@ -1033,6 +1033,10 @@ class LoadingSpinner(QWidget):
         super().__init__(parent)
         self.setFixedSize(42, 42)
         self._angle = 0
+        self._base_pen = QPen(QColor(255, 255, 255, 36), 4)
+        self._base_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        self._arc_pen = QPen(QColor("#32e6f0"), 4)
+        self._arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         self._timer = QTimer(self)
         self._timer.setInterval(35)
         self._timer.timeout.connect(self._rotate)
@@ -1046,14 +1050,9 @@ class LoadingSpinner(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = self.rect().adjusted(5, 5, -5, -5)
-        base_pen = QPen(QColor(255, 255, 255, 36), 4)
-        base_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(base_pen)
+        painter.setPen(self._base_pen)
         painter.drawArc(rect, 0, 360 * 16)
-
-        arc_pen = QPen(QColor("#32e6f0"), 4)
-        arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(arc_pen)
+        painter.setPen(self._arc_pen)
         painter.drawArc(rect, self._angle * 16, -115 * 16)
 
 
@@ -2381,6 +2380,7 @@ class App(FluentWindow):
             if dialog.exec():
                 choice = dialog.choice
                 remember = dialog.chk_remember.isChecked()
+                dialog.deleteLater()
                 
                 update_settings({
                     "close_behavior": choice,
@@ -2402,6 +2402,7 @@ class App(FluentWindow):
                     event.accept()
                     QApplication.quit()
             else:
+                dialog.deleteLater()
                 event.ignore()
 
     def _on_log(self, text):
@@ -2484,7 +2485,9 @@ class App(FluentWindow):
         enable = (state == 2)
         if enable:
             w = MessageBox("需要重启显示器", "启用 4K UI 需要重启显示器才能生效。\n\n点击确定后将设置分辨率为 3840×2160、DPI 640，并重启显示器。\n\n是否继续？", self)
-            if not w.exec():
+            accepted = w.exec()
+            w.deleteLater()
+            if not accepted:
                 self.chk_4k.blockSignals(True)
                 self.chk_4k.setChecked(False)
                 self.chk_4k.blockSignals(False)
@@ -2616,6 +2619,7 @@ class App(FluentWindow):
     def _show_message_box(self, mtype, title, text):
         w = MessageBox(title, text, self)
         w.exec()
+        w.deleteLater()
 
     def setup_ui(self):
         self.home_page = self._make_home_page()
@@ -2775,6 +2779,7 @@ class App(FluentWindow):
             }
         """)
         self.log_widget.setFixedHeight(220)
+        self.log_widget.document().setMaximumBlockCount(500)
         self.log_widget.append("[00:00:00] 系统就绪，等待连接...")
         log_layout.addWidget(self.log_widget)
 
@@ -3807,7 +3812,7 @@ class App(FluentWindow):
         slider.valueChanged.connect(lambda v: val_label.setText(str(v)))
         self.sliders[name] = (slider, val_label)
 
-        _debounce_timer = QTimer(self)
+        _debounce_timer = QTimer(card)
         _debounce_timer.setSingleShot(True)
         _debounce_timer.setInterval(300)
 
@@ -3856,7 +3861,7 @@ class App(FluentWindow):
         slider.valueChanged.connect(lambda v: val_label.setText(str(v)))
         self.sliders[name] = (slider, val_label)
 
-        _debounce_timer = QTimer(self)
+        _debounce_timer = QTimer(card)
         _debounce_timer.setSingleShot(True)
         _debounce_timer.setInterval(300)
 
@@ -3891,7 +3896,7 @@ class App(FluentWindow):
         slider.valueChanged.connect(lambda v: val_label.setText(str(v)))
         self.sliders[name] = (slider, val_label)
 
-        _debounce_timer = QTimer(self)
+        _debounce_timer = QTimer(card)
         _debounce_timer.setSingleShot(True)
         _debounce_timer.setInterval(300)
         _debounce_timer.timeout.connect(lambda: self._set_screen_light_illumination(slider.value()))
@@ -4068,7 +4073,9 @@ class App(FluentWindow):
             return
         mode_name = self._MODE_NAMES[cur]
         w = MessageBox("恢复默认设置", f"你确定要恢复当前模式：{mode_name} 的默认设置吗？", self)
-        if w.exec():
+        accepted = w.exec()
+        w.deleteLater()
+        if accepted:
             self._mark_adb_busy(4.0)
 
             def operation():
@@ -5081,6 +5088,10 @@ class App(FluentWindow):
         page = pages.get(page_name)
         if not page:
             return
+        # 先清理已有的 overlay，防止重复创建导致泄漏
+        for child in page.findChildren(QWidget):
+            if child.objectName() == "_loading_overlay":
+                child.deleteLater()
         overlay = QWidget(page)
         overlay.setObjectName("_loading_overlay")
         overlay.setStyleSheet("background-color: rgba(0, 0, 0, 120);")
@@ -5104,7 +5115,6 @@ class App(FluentWindow):
         for child in page.findChildren(QWidget):
             if child.objectName() == "_loading_overlay":
                 child.deleteLater()
-                break
 
     def _force_refresh_page(self, page_name):
         self._page_loaded.discard(page_name)
@@ -5173,6 +5183,7 @@ if __name__ == "__main__":
                 if msg == "show":
                     w.show_and_raise()
             client_socket.close()
+            client_socket.deleteLater()
             
     local_server.newConnection.connect(on_new_connection)
 
