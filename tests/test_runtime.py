@@ -167,7 +167,10 @@ class AdbRuntimeTests(unittest.TestCase):
             ("连接中...（设备离线，正在重连）",),
             ("未连接（设备离线）",),
         ])
-        self.assertEqual(commands, [["connect", "192.168.5.205:5555"]])
+        self.assertEqual(commands, [
+            ["disconnect", "192.168.5.205:5555"],
+            ["connect", "192.168.5.205:5555"]
+        ])
 
     def test_adb_server_probe_does_not_start_adb(self):
         fake_socket = mock.Mock()
