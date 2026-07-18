@@ -121,9 +121,6 @@ def _write_settings_unlocked(settings):
             except Exception:
                 pass
 
-def save_settings(settings):
-    with _settings_lock:
-        return _write_settings_unlocked(settings)
 
 def update_settings(changes):
     with _settings_lock:
@@ -161,8 +158,6 @@ def query_windows_hdr_enabled(window_handle=None):
         def make_guid(value):
             return GUID.from_buffer_copy(uuid.UUID(value).bytes_le)
 
-        class POINTL(ctypes.Structure):
-            _fields_ = [("x", wt.LONG), ("y", wt.LONG)]
 
         class RECTL(ctypes.Structure):
             _fields_ = [("left", wt.LONG), ("top", wt.LONG), ("right", wt.LONG), ("bottom", wt.LONG)]
@@ -815,38 +810,60 @@ class Adb:
 
 def scan_adb(base="192.168.5", cb=None, log=None):
     found = []
-    lock = threading.Lock()
 
-    def chk(ip):
+    # ── 阶段一：全量并发 socket 探测 ──
+    # 254 个线程同时探测，0.3 秒超时，极轻量
+    open_ips = []
+    open_lock = threading.Lock()
+
+    def probe(ip):
+        s = None
         try:
             s = socket.socket()
             s.settimeout(0.3)
             if s.connect_ex((ip, 5555)) == 0:
-                s.close()
-                if log: log(f"[扫描] {ip}:5555 开放")
-                o = adb_run(["connect", f"{ip}:5555"], 5)
-                if log: log(f"[扫描] {ip} adb: {o}")
-                if adb_connect_output_ok(o) and adb_device_state(f"{ip}:5555", timeout=3) == "device":
-                    m = adb_run(["-s", f"{ip}:5555", "shell", "getprop ro.product.model"], 3) or "?"
-                    if adb_text_has_disconnected_marker(m):
-                        return
-                    with lock:
-                        found.append((ip, m))
-                    if cb: cb(ip, m)
-            else:
-                s.close()
+                with open_lock:
+                    open_ips.append(ip)
         except Exception:
             pass
+        finally:
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
 
     if log: log(f"[扫描] 开始 {base}.1~254")
-    ts = []
+    threads = []
     for i in range(1, 255):
-        t = threading.Thread(target=chk, args=(f"{base}.{i}",), daemon=True)
-        t.start(); ts.append(t)
-        if len(ts) >= 60:
-            for t in ts: t.join(timeout=3)
-            ts = []
-    for t in ts: t.join(timeout=3)
+        t = threading.Thread(target=probe, args=(f"{base}.{i}",), daemon=True)
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join(timeout=1)
+
+    if log: log(f"[扫描] 端口探测完成，{len(open_ips)} 个 IP 的 5555 端口开放")
+
+    # ── 阶段二：仅对端口开放的 IP 做 ADB 验证 ──
+    # ADB 命令受全局锁限制本质串行，直接顺序处理即可
+    for ip in open_ips:
+        serial = f"{ip}:5555"
+        try:
+            if log: log(f"[扫描] {ip}:5555 开放，正在验证...")
+            o = adb_run(["connect", serial], 5)
+            if log: log(f"[扫描] {ip} adb: {o}")
+            if adb_connect_output_ok(o) and adb_device_state(serial, timeout=3) == "device":
+                m = adb_run(["-s", serial, "shell", "getprop ro.product.model"], 3) or "?"
+                if adb_text_has_disconnected_marker(m):
+                    adb_run(["disconnect", serial], 3)
+                    continue
+                found.append((ip, m))
+                if cb: cb(ip, m)
+            else:
+                # 非目标设备或连接失败，清理 ADB transport 条目
+                adb_run(["disconnect", serial], 3)
+        except Exception:
+            pass
     if log: log(f"[扫描] 完成，发现 {len(found)} 台")
     return found
 
@@ -1174,7 +1191,6 @@ class App(FluentWindow):
         global _log_path
         _log_path = os.path.join(get_log_dir(), f"log_{time.strftime('%Y%m%d_%H%M%S')}.txt")
         self.is_forcing_exit = False
-        self.page_status_indicators = []
         self.adb_connected = False
         self._cleanup_done = False
         self._windows_session_ending = False
@@ -2290,7 +2306,10 @@ class App(FluentWindow):
                 if state == "device":
                     return
 
+                # 先 disconnect 清除可能存在的 stale transport，
+                # 否则 adb connect 会返回 "already connected" 但实际 TCP 已断
                 self.status_signal.emit(f"连接中...（{adb_device_state_label(state)}，正在重连）")
+                adb_run(["disconnect", serial], timeout=3)
                 adb_run(["connect", serial], timeout=5)
                 state = adb_device_state(serial, timeout=3)
                 if state != "device":
