@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
 )
 from qfluentwidgets import (
     FluentWindow, PushButton, PrimaryPushButton, ToggleButton, Slider, ComboBox, LineEdit,
-    ScrollArea, BodyLabel, SubtitleLabel, TitleLabel, SimpleCardWidget,
+    ScrollArea, BodyLabel, CaptionLabel, SubtitleLabel, TitleLabel, SimpleCardWidget,
     FluentIcon as FIF, MessageBox, Theme, setTheme, CheckBox, IconWidget
 )
 
@@ -138,6 +138,17 @@ def get_local_subnet():
         return ".".join(ip.split(".")[:3])
     except OSError:
         return "192.168.1"
+
+from PyQt6.QtCore import QObject, QEvent
+
+class OverlayResizeFilter(QObject):
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Resize:
+            for child in obj.findChildren(QWidget, "_loading_overlay"):
+                child.setGeometry(obj.rect())
+        return super().eventFilter(obj, event)
+
+_global_overlay_filter = None
 
 
 def query_windows_hdr_enabled(window_handle=None):
@@ -1007,15 +1018,15 @@ class CloseConfirmDialog(QDialog):
         layout.setSpacing(12)
         
         title = SubtitleLabel("退出确认", self.bg_frame)
-        title.setStyleSheet("color: white; font-weight: bold; font-size: 16px;")
+
         layout.addWidget(title)
         
         desc = BodyLabel("请选择关闭窗口时的行为：\n最小化到系统托盘，还是直接退出程序？", self.bg_frame)
-        desc.setStyleSheet("color: rgba(255, 255, 255, 0.85); font-size: 13px; line-height: 1.5;")
+
         layout.addWidget(desc)
         
         self.chk_remember = CheckBox("记住我的选择，以后不再提示", self.bg_frame)
-        self.chk_remember.setStyleSheet("color: rgba(255, 255, 255, 0.95); font-size: 12px;")
+
         layout.addWidget(self.chk_remember)
         
         btn_layout = QHBoxLayout()
@@ -1121,12 +1132,12 @@ class InstallProgressDialog(QDialog):
         text_layout = QVBoxLayout()
         text_layout.setSpacing(8)
         title = SubtitleLabel("正在安装 APK", frame)
-        title.setStyleSheet("color: white; font-size: 17px; font-weight: 700;")
+
         text_layout.addWidget(title)
 
         desc = BodyLabel(f"正在安装 {apk_name}\n请保持显示器连接，完成前不要关闭软件。", frame)
         desc.setWordWrap(True)
-        desc.setStyleSheet("color: rgba(255, 255, 255, 0.78); font-size: 13px;")
+
         text_layout.addWidget(desc)
         layout.addLayout(text_layout, 1)
 
@@ -1915,9 +1926,17 @@ class App(FluentWindow):
             return
         enabled = self._freesync_mode_memory_enabled()
         mode = self._get_freesync_memory_mode()
-        mode_text = self._picture_mode_display_name(mode) if mode is not None else "--"
-        prefix = "已开启" if enabled else "已关闭"
-        label.setText(f"FreeSync 模式记忆：{prefix}，记录的开启前模式：{mode_text}（关闭 FreeSync 后自动切回）")
+        is_freesync_on = getattr(self, "current_vals", {}).get("freesync") == 1
+        
+        if is_freesync_on:
+            mode_text = self._picture_mode_display_name(mode) if mode is not None else "--"
+            prefix = "已开启" if enabled else "已关闭"
+            label.setText(f"FreeSync 模式记忆：{prefix}，已记录开启前模式：{mode_text}（关闭后切回）")
+        else:
+            current_mode = getattr(self, "current_vals", {}).get("picture_mode")
+            mode_text = self._picture_mode_display_name(current_mode) if current_mode is not None else "--"
+            prefix = "已开启" if enabled else "已关闭"
+            label.setText(f"FreeSync 模式记忆：{prefix}，开启时将记录当前模式：{mode_text}")
 
     def _mark_adb_busy(self, seconds=2.0):
         self._adb_busy_until = max(getattr(self, "_adb_busy_until", 0.0), time.monotonic() + seconds)
@@ -2054,9 +2073,9 @@ class App(FluentWindow):
         runtime_note = ""
         if enabled and self._close_behavior_is_direct_exit():
             runtime_note = "；已选择直接退出，此功能仅在应用运行时生效"
-            label.setStyleSheet("color: #d83b01; font-size: 12px;")
+            label.setTextColor(QColor(216, 59, 1), QColor(216, 59, 1))
         else:
-            label.setStyleSheet("color: rgba(255, 255, 255, 0.55); font-size: 12px;")
+            label.setTextColor(QColor(120, 120, 120), QColor(255, 255, 255, 140))
         label.setText(f"分区控光记忆：{prefix}，当前信号：{state_text}{state_source_text}，记忆模式：SDR={sdr_text}，HDR={hdr_text}{source_text}{runtime_note}")
 
     def _schedule_hdr_memory_apply(self, delay_ms=250):
@@ -2682,7 +2701,7 @@ class App(FluentWindow):
         row.addWidget(icon_widget, 0, Qt.AlignmentFlag.AlignVCenter)
         label = SubtitleLabel(text, parent)
         label.setFixedHeight(26)
-        label.setStyleSheet("margin: 0; padding: 0;")
+
         row.addWidget(label, 0, Qt.AlignmentFlag.AlignVCenter)
         row.addStretch(1)
         wrapper = QWidget(parent)
@@ -2837,7 +2856,7 @@ class App(FluentWindow):
 
         title_row = QHBoxLayout()
         title = SubtitleLabel("画面设置", container)
-        title.setStyleSheet("font-size: 24px; font-weight: bold; margin-bottom: 5px;")
+
         title_row.addWidget(title)
         title_row.addStretch(1)
         refresh_pic_btn = PushButton(FIF.UPDATE, "刷新数据", container)
@@ -2867,7 +2886,7 @@ class App(FluentWindow):
         reset_mode_btn.clicked.connect(self._reset_current_mode)
         h.addWidget(reset_mode_btn)
         self.picture_mode_hint_label = BodyLabel("当前场景：未刷新", lf)
-        self.picture_mode_hint_label.setStyleSheet("color: rgba(255, 255, 255, 0.55); font-size: 12px;")
+
         h.addWidget(self.picture_mode_hint_label)
         h.addStretch(1)
         lf_layout.addLayout(h)
@@ -2950,7 +2969,7 @@ class App(FluentWindow):
 
         title_row = QHBoxLayout()
         title = SubtitleLabel("游戏模式", container)
-        title.setStyleSheet("font-size: 24px; font-weight: bold; margin-bottom: 5px;")
+
         title_row.addWidget(title)
         title_row.addStretch(1)
         refresh_game_btn = PushButton(FIF.UPDATE, "刷新数据", container)
@@ -3021,7 +3040,7 @@ class App(FluentWindow):
 
         title_row = QHBoxLayout()
         title = SubtitleLabel("信号源切换", container)
-        title.setStyleSheet("font-size: 24px; font-weight: bold; margin-bottom: 5px;")
+
         title_row.addWidget(title)
         title_row.addStretch(1)
         refresh_source_btn = PushButton(FIF.UPDATE, "刷新数据", container)
@@ -3059,7 +3078,7 @@ class App(FluentWindow):
         status_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         lbl = BodyLabel("当前活跃信号源", status_card)
-        lbl.setStyleSheet("font-size: 14px; color: rgba(255, 255, 255, 0.6);")
+
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         status_layout.addWidget(lbl)
 
@@ -3086,7 +3105,7 @@ class App(FluentWindow):
 
         title_row = QHBoxLayout()
         title = SubtitleLabel("屏幕灯", container)
-        title.setStyleSheet("font-size: 24px; font-weight: bold; margin-bottom: 5px;")
+
         title_row.addWidget(title)
         title_row.addStretch(1)
         refresh_light_btn = PushButton(FIF.UPDATE, "刷新数据", container)
@@ -3137,7 +3156,7 @@ class App(FluentWindow):
 
 
         title = SubtitleLabel("工具与设置", container)
-        title.setStyleSheet("font-size: 24px; font-weight: bold; margin-bottom: 5px;")
+
         layout.addWidget(title)
 
         grid = QGridLayout()
@@ -3153,7 +3172,7 @@ class App(FluentWindow):
         
         lbl_c1_desc = BodyLabel("在外部终端中弹出一个交互式的 ADB Shell 会话，供开发人员和高级用户直接调试显示器的 Android 系统参数。", card1)
         lbl_c1_desc.setWordWrap(True)
-        lbl_c1_desc.setStyleSheet("color: rgba(255, 255, 255, 0.6); font-size: 12px; height: 50px;")
+
         c1_lay.addWidget(lbl_c1_desc)
 
         btn_c1 = PrimaryPushButton(FIF.COMMAND_PROMPT, "启动 Shell 终端", card1)
@@ -3171,7 +3190,7 @@ class App(FluentWindow):
         
         lbl_c2_desc = BodyLabel("通过无线 ADB 安全、静默地向您的显示器安装第三方的 Android APK 应用软件包，支持完整的安装状态回执提示。", card2)
         lbl_c2_desc.setWordWrap(True)
-        lbl_c2_desc.setStyleSheet("color: rgba(255, 255, 255, 0.6); font-size: 12px; height: 50px;")
+
         c2_lay.addWidget(lbl_c2_desc)
 
         btn_c2 = PrimaryPushButton(FIF.APPLICATION, "选择并安装应用", card2)
@@ -3272,10 +3291,6 @@ class App(FluentWindow):
         self.btn_setting_tray.clicked.connect(on_choose_tray)
         self.btn_setting_exit.clicked.connect(on_choose_exit)
         
-        lbl_tip = BodyLabel("* 提示：当选择最小化到托盘时，关闭窗口会使程序在后台默默运行，可通过任务栏右下角的托盘图标随时恢复或退出。", card3)
-        lbl_tip.setStyleSheet("color: rgba(255, 255, 255, 0.4); font-size: 11px;")
-        c3_lay.addWidget(lbl_tip)
-
         # Auto-start minimized
         autostart_layout = QHBoxLayout()
         autostart_layout.setSpacing(15)
@@ -3286,6 +3301,10 @@ class App(FluentWindow):
         autostart_layout.addStretch()
         c3_lay.addLayout(autostart_layout)
 
+        lbl_tip = CaptionLabel("* 提示：当选择最小化到托盘时，关闭窗口会使程序在后台默默运行，可通过任务栏右下角的托盘图标随时恢复或退出。", card3)
+        lbl_tip.setTextColor(QColor(120, 120, 120), QColor(255, 255, 255, 140))
+        c3_lay.addWidget(lbl_tip)
+
         hdr_memory_layout = QHBoxLayout()
         hdr_memory_layout.setSpacing(15)
         self.chk_hdr_local_dimming_memory = CheckBox("HDR/SDR 分区控光记忆", card3)
@@ -3295,8 +3314,8 @@ class App(FluentWindow):
         hdr_memory_layout.addStretch()
         c3_lay.addLayout(hdr_memory_layout)
 
-        self.hdr_memory_status_label = BodyLabel("当前信号：未检测", card3)
-        self.hdr_memory_status_label.setStyleSheet("color: rgba(255, 255, 255, 0.55); font-size: 12px;")
+        self.hdr_memory_status_label = CaptionLabel("当前信号：未检测", card3)
+        self.hdr_memory_status_label.setTextColor(QColor(120, 120, 120), QColor(255, 255, 255, 140))
         c3_lay.addWidget(self.hdr_memory_status_label)
 
         freesync_memory_layout = QHBoxLayout()
@@ -3308,8 +3327,8 @@ class App(FluentWindow):
         freesync_memory_layout.addStretch()
         c3_lay.addLayout(freesync_memory_layout)
 
-        self.freesync_memory_status_label = BodyLabel("FreeSync 模式记忆：未启用", card3)
-        self.freesync_memory_status_label.setStyleSheet("color: rgba(255, 255, 255, 0.55); font-size: 12px;")
+        self.freesync_memory_status_label = CaptionLabel("FreeSync 模式记忆：未启用", card3)
+        self.freesync_memory_status_label.setTextColor(QColor(120, 120, 120), QColor(255, 255, 255, 140))
         c3_lay.addWidget(self.freesync_memory_status_label)
 
         grid.addWidget(card3, 2, 0, 1, 2)
@@ -3324,7 +3343,7 @@ class App(FluentWindow):
 
         lbl_c5_desc = BodyLabel("将显示器 UI 分辨率提升至 3840×2160，DPI 设为 640。开启或关闭后显示器将自动重启。", card5)
         lbl_c5_desc.setWordWrap(True)
-        lbl_c5_desc.setStyleSheet("color: rgba(255, 255, 255, 0.6); font-size: 12px;")
+
         c5_lay.addWidget(lbl_c5_desc)
 
         self.chk_4k = CheckBox("启用 4K UI", card5)
@@ -3343,11 +3362,11 @@ class App(FluentWindow):
 
         lbl_c6_desc = BodyLabel("部署电视端 AdbGuardian，重启、待机或唤醒后自动恢复无线 ADB，并保持 5555 端口可用。", card6)
         lbl_c6_desc.setWordWrap(True)
-        lbl_c6_desc.setStyleSheet("color: rgba(255, 255, 255, 0.6); font-size: 12px;")
+
         c6_lay.addWidget(lbl_c6_desc)
 
         self.guardian_status_label = BodyLabel("状态：未检测", card6)
-        self.guardian_status_label.setStyleSheet("color: rgba(255, 255, 255, 0.82); font-size: 13px;")
+
         c6_lay.addWidget(self.guardian_status_label)
 
         guardian_btn_row = QHBoxLayout()
@@ -3374,11 +3393,11 @@ class App(FluentWindow):
         c4_lay.setContentsMargins(20, 20, 20, 20)
         c4_lay.setSpacing(15)
         
-        self._add_icon_title(c4_lay, FIF.TAG, "自定义全局快捷键 (Windows 独占)", card4)
+        self._add_icon_title(c4_lay, FIF.TAG, "自定义全局快捷键", card4)
         
         lbl_c4_desc = BodyLabel("为所有带档位切换的功能提供自定义全局快捷键支持。支持后台/游戏中静默控制，设置完成后自动弹出系统原生气泡通知。", card4)
         lbl_c4_desc.setWordWrap(True)
-        lbl_c4_desc.setStyleSheet("color: rgba(255, 255, 255, 0.6); font-size: 12px;")
+
         c4_lay.addWidget(lbl_c4_desc)
         
         self.hotkey_combos = {}
@@ -3430,7 +3449,7 @@ class App(FluentWindow):
             add_hotkey_row(c4_lay, label_txt, act_name)
 
         adjust_title = BodyLabel("可调参数快捷键", card4)
-        adjust_title.setStyleSheet("font-size: 13px; font-weight: bold; color: rgba(255, 255, 255, 0.88);")
+
         c4_lay.addWidget(adjust_title)
 
         param_keys = list(ADJUSTABLE_HOTKEY_PARAMS.keys())
@@ -3578,7 +3597,7 @@ class App(FluentWindow):
         github_link.setText('仓库地址：<a href="https://github.com/YiHooong/Mimonitor_Toolbox" style="color: #734EFF;">https://github.com/YiHooong/Mimonitor_Toolbox</a>')
         github_link.setOpenExternalLinks(True)
         github_link.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        github_link.setStyleSheet("font-size: 12px; padding: 10px;")
+
         layout.addWidget(github_link)
 
         scroll.setWidget(container)
@@ -3596,7 +3615,7 @@ class App(FluentWindow):
 
 
         title = SubtitleLabel("遥控器", container)
-        title.setStyleSheet("font-size: 24px; font-weight: bold; margin-bottom: 5px;")
+
         layout.addWidget(title)
 
         main_frame = QFrame(container)
@@ -3606,15 +3625,9 @@ class App(FluentWindow):
         main_layout.setSpacing(40)
 
         # High-End Remote Controller body (Simulated Hardware)
-        remote_card = QFrame(main_frame)
+        remote_card = SimpleCardWidget(main_frame)
         remote_card.setFixedSize(300, 520)
-        remote_card.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #161616, stop:1 #232323);
-                border: 2px solid rgba(255, 255, 255, 0.08);
-                border-radius: 28px;
-            }
-        """)
+        
         rc_layout = QVBoxLayout(remote_card)
         rc_layout.setContentsMargins(25, 25, 25, 25)
         rc_layout.setSpacing(18)
@@ -3668,23 +3681,7 @@ class App(FluentWindow):
 
         for btn, key in [(btn_home, "KEYCODE_HOME"), (btn_menu, "KEYCODE_MENU"), (btn_back, "KEYCODE_BACK")]:
             btn.setFixedSize(72, 32)
-            btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #2c2c2c;
-                    border: 1px solid rgba(255, 255, 255, 0.08);
-                    border-radius: 16px;
-                    color: #e3e3e3;
-                    font-size: 12px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #383838;
-                    border-color: rgba(255, 255, 255, 0.15);
-                }
-                QPushButton:pressed {
-                    background-color: #1e1e1e;
-                }
-            """)
+            
             btn.clicked.connect(lambda checked=False, k=key: self._key(k))
             row_menu.addWidget(btn)
             
@@ -3695,8 +3692,8 @@ class App(FluentWindow):
         dpad_container.setFixedSize(190, 190)
         dpad_container.setStyleSheet("""
             QFrame {
-                background-color: #1a1a1a;
-                border: 2px solid rgba(255, 255, 255, 0.06);
+                background-color: rgba(128, 128, 128, 0.1);
+                border: 1px solid rgba(128, 128, 128, 0.2);
                 border-radius: 95px;
             }
         """)
@@ -3721,7 +3718,7 @@ class App(FluentWindow):
             QPushButton {
                 background: transparent;
                 border: none;
-                color: #b0b0b0;
+                color: #888888;
                 font-size: 18px;
             }
             QPushButton:hover {
@@ -3782,24 +3779,7 @@ class App(FluentWindow):
 
         for btn, key in [(btn_vol_down, "KEYCODE_VOLUME_DOWN"), (btn_mute, "KEYCODE_VOLUME_MUTE"), (btn_vol_up, "KEYCODE_VOLUME_UP")]:
             btn.setFixedSize(74, 34)
-            btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #2c2c2c;
-                    border: 1px solid rgba(255, 255, 255, 0.08);
-                    border-radius: 17px;
-                    color: #e3e3e3;
-                    font-size: 12px;
-                    font-weight: bold;
-                    padding: 0;
-                }
-                QPushButton:hover {
-                    background-color: #383838;
-                    border-color: rgba(255, 255, 255, 0.15);
-                }
-                QPushButton:pressed {
-                    background-color: #1e1e1e;
-                }
-            """)
+            
             btn.clicked.connect(lambda checked=False, k=key: self._key(k))
             vol_layout.addWidget(btn)
 
@@ -3994,6 +3974,7 @@ class App(FluentWindow):
             self._highlight_btn(btn, mode_int in group or str(m) == str(mode))
         self._update_picture_mode_hint(mode_int)
         self._update_hdr_tone_mapping_visibility(mode_int)
+        self._update_freesync_memory_status_label()
 
     def _picture_mode_group_name(self, mode):
         for primary, name in ((14, "标准"), (10, "游戏"), (9, "电影")):
@@ -4038,7 +4019,7 @@ class App(FluentWindow):
         group_name = self._picture_mode_group_name(mode_int)
         if group_name:
             label.setText(f"当前场景：{group_name}（{mode_int}）")
-            label.setStyleSheet("color: rgba(255, 255, 255, 0.55); font-size: 12px;")
+            label.setStyleSheet("font-size: 12px;")
             return
 
         scene_name = PICTURE_SCENE_NAMES.get(mode_int, "未知场景")
@@ -5115,10 +5096,19 @@ class App(FluentWindow):
         overlay.setObjectName("_loading_overlay")
         overlay.setStyleSheet("background-color: rgba(0, 0, 0, 120);")
         overlay.setGeometry(page.rect())
+        
+        # Centering using layout
+        lay = QVBoxLayout(overlay)
         label = BodyLabel("正在刷新数据...", overlay)
         label.setStyleSheet("color: white; font-size: 16px; background: transparent;")
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setGeometry(overlay.rect())
+        lay.addWidget(label, 0, Qt.AlignmentFlag.AlignCenter)
+        
+        global _global_overlay_filter
+        if _global_overlay_filter is None:
+            _global_overlay_filter = OverlayResizeFilter()
+        page.installEventFilter(_global_overlay_filter)
+        
         overlay.show()
         overlay.raise_()
 
