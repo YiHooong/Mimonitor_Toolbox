@@ -94,23 +94,52 @@ service call TvService 3 s16 "sh -c eval\${IFS}CLASSPATH=...\${IFS}MtkDirectTool
 ## 项目资源结构
 
 ```text
-assets/
-  app/
-    icon.ico
-  runtime/
-    adb.exe
-    AdbWinApi.dll
-    AdbWinUsbApi.dll
-    MtkDirectTool.jar
-    ColorfulLedTool.jar
-  adb_guardian/
-    adbguardian-signed.apk
-tools/
-  colorful_led/
-    ColorfulLedTool.java
+Mimonitor_Toolbox/
+├─ monitor_controller.py          # 源码运行入口，转发到应用包
+├─ MonitorToolbox.spec            # PyInstaller 打包配置和资源清单
+├─ build.bat                      # Windows 一键打包脚本
+├─ requirements-build.txt         # 锁定的运行与构建依赖
+├─ mimonitor_toolbox/             # 主程序包
+│  ├─ app.py                      # Qt 启动、单实例通信和事件循环
+│  ├─ main_window.py              # 主窗口状态、托盘、快捷键和应用生命周期
+│  ├─ pages.py                    # 各功能页面及控件布局
+│  ├─ device_features.py          # 设备连接、扫描、保活和页面数据刷新
+│  ├─ display_features.py         # 画面、游戏、信号源和灯效控制逻辑
+│  ├─ adb.py                      # 私有 ADB 服务、命令执行和设备通信
+│  ├─ network_scan.py             # Windows 物理网卡筛选和内网端口扫描
+│  ├─ windows.py                  # Windows HDR、自启动和系统接口
+│  ├─ widgets.py                  # OSD、弹窗、加载动画等自定义控件
+│  ├─ core.py                     # 路径、设置、常量和模式映射
+│  └─ __init__.py                 # Python 包标识
+├─ assets/                        # 打包进程序的运行资源
+│  ├─ app/
+│  │  └─ icon.ico                 # 程序图标
+│  ├─ runtime/
+│  │  ├─ adb.exe                  # Windows ADB 客户端
+│  │  ├─ AdbWinApi.dll            # ADB Windows 运行库
+│  │  ├─ AdbWinUsbApi.dll         # ADB Windows USB 运行库
+│  │  ├─ MtkDirectTool.jar        # MTK 寄存器读写 helper
+│  │  └─ ColorfulLedTool.jar      # 屏幕灯控制 helper
+│  └─ adb_guardian/
+│     └─ adbguardian-signed.apk   # 显示器端 ADB 保活应用
+├─ tools/                         # 设备端 helper 源码及说明
+│  ├─ mtk_direct/
+│  │  ├─ MtkDirectTool.java
+│  │  └─ README.md
+│  └─ colorful_led/
+│     ├─ ColorfulLedTool.java
+│     └─ README.md
+└─ tests/                         # 按模块划分的单元测试与运行状态测试
+   ├─ test_adb.py
+   ├─ test_network_scan.py
+   ├─ test_device_features.py
+   ├─ test_display_features.py
+   ├─ test_pages.py
+   ├─ test_runtime.py
+   └─ ...
 ```
 
-`assets/runtime/` 是主程序运行所需的本地工具，`assets/adb_guardian/` 是可部署到显示器端的 ADB 保活应用，`tools/colorful_led/` 保留屏幕灯 helper 源码。
+源码入口只负责启动应用；窗口、页面、设备生命周期和显示器控制逻辑均拆分在 `mimonitor_toolbox/` 中。`assets/` 保存发布版本运行时必须携带的二进制资源，`tools/` 保留对应 helper 的可读源码，`tests/` 用于验证模块边界、设备状态机和 Windows 专属行为。
 
 ## 打包
 
