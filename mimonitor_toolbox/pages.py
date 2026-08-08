@@ -536,22 +536,28 @@ class PagesMixin:
         grid = QGridLayout()
         grid.setSpacing(20)
 
-        # ADB Shell Card
+        # ADB Command Card
         card1 = SimpleCardWidget(container)
         c1_lay = QVBoxLayout(card1)
         c1_lay.setContentsMargins(20, 20, 20, 20)
         c1_lay.setSpacing(10)
         
-        self._add_icon_title(c1_lay, FIF.COMMAND_PROMPT, "打开 ADB Shell", card1)
+        self._add_icon_title(c1_lay, FIF.COMMAND_PROMPT, "ADB 命令行工具", card1)
         
-        lbl_c1_desc = BodyLabel("在外部终端中弹出一个交互式的 ADB Shell 会话，供开发人员和高级用户直接调试显示器的 Android 系统参数。", card1)
+        lbl_c1_desc = BodyLabel("打开使用本软件独立 ADB 服务的 Windows 命令行，或直接进入当前显示器的交互式 ADB Shell。", card1)
         lbl_c1_desc.setWordWrap(True)
 
         c1_lay.addWidget(lbl_c1_desc)
 
-        btn_c1 = PrimaryPushButton(FIF.COMMAND_PROMPT, "启动 Shell 终端", card1)
-        btn_c1.clicked.connect(self._open_shell)
-        c1_lay.addWidget(btn_c1)
+        adb_button_row = QHBoxLayout()
+        adb_button_row.setSpacing(10)
+        btn_adb_cmd = PushButton(FIF.COMMAND_PROMPT, "打开 ADB CMD", card1)
+        btn_adb_cmd.clicked.connect(self._open_adb_cmd)
+        adb_button_row.addWidget(btn_adb_cmd)
+        btn_adb_shell = PrimaryPushButton(FIF.COMMAND_PROMPT, "进入 ADB Shell", card1)
+        btn_adb_shell.clicked.connect(self._open_shell)
+        adb_button_row.addWidget(btn_adb_shell)
+        c1_lay.addLayout(adb_button_row)
         grid.addWidget(card1, 0, 0)
 
         # APK Install Card

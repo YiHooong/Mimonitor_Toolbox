@@ -11,6 +11,8 @@ from PyQt6.QtWidgets import QFileDialog, QSystemTrayIcon, QVBoxLayout, QWidget
 from qfluentwidgets import BodyLabel
 
 from .adb import (
+    ADB,
+    ADB_SERVER_PORT,
     Adb,
     adb_command,
     adb_command_text,
@@ -38,6 +40,7 @@ from .network_scan import WindowsAdapterError
 from .widgets import InstallProgressDialog, OverlayResizeFilter
 
 _global_overlay_filter = None
+CREATE_NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010)
 
 
 class DeviceFeaturesMixin:
@@ -493,6 +496,25 @@ class DeviceFeaturesMixin:
                     break
             if not launched:
                 self._show_message_box("error", "错误", f"未找到可用的终端模拟器，请手动在终端中运行: {shell_cmd}")
+
+    def _open_adb_cmd(self):
+        if sys.platform != "win32":
+            self._show_message_box("error", "错误", "ADB CMD 仅支持 Windows。")
+            return
+        self.log("正在打开 ADB CMD...")
+        adb_path = os.path.abspath(ADB)
+        command = (
+            "title Mimonitor ADB CMD & "
+            f"doskey adb=adb.exe -P {ADB_SERVER_PORT} $*"
+        )
+        try:
+            subprocess.Popen(
+                ["cmd.exe", "/k", command],
+                cwd=os.path.dirname(adb_path),
+                creationflags=CREATE_NEW_CONSOLE,
+            )
+        except OSError as exc:
+            self._show_message_box("error", "错误", f"无法打开 ADB CMD：{exc}")
 
     def _guardian_shell(self, cmd):
         return self.adb.shell(cmd).strip().replace("\r", "")

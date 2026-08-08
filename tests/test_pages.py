@@ -4,7 +4,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QAbstractButton, QApplication
 
 _qt_application = QApplication.instance() or QApplication([])
 
@@ -51,6 +51,27 @@ class PageContractTests(unittest.TestCase):
         self.assertEqual(
             [name for name in expected if not hasattr(window, name)],
             [],
+        )
+        window._cleanup_done = True
+        window.deleteLater()
+        _qt_application.processEvents()
+
+    def test_adb_cmd_and_shell_buttons_share_one_tool_card(self):
+        from mimonitor_toolbox.main_window import App
+
+        with mock.patch.object(App, "register_global_hotkeys"), \
+                mock.patch.object(App, "setup_tray"):
+            window = App()
+
+        buttons = {
+            button.text(): button
+            for button in window.tools_page.findChildren(QAbstractButton)
+        }
+        self.assertIn("打开 ADB CMD", buttons)
+        self.assertIn("进入 ADB Shell", buttons)
+        self.assertIs(
+            buttons["打开 ADB CMD"].parent(),
+            buttons["进入 ADB Shell"].parent(),
         )
         window._cleanup_done = True
         window.deleteLater()
