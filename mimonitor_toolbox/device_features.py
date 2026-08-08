@@ -27,6 +27,7 @@ from .adb import (
     scan_adb,
 )
 from .core import (
+    GAME_FEATURE_KEYS,
     GUARDIAN_ACCESSIBILITY,
     GUARDIAN_MAIN_ACTIVITY,
     GUARDIAN_PACKAGE,
@@ -75,6 +76,7 @@ class DeviceFeaturesMixin:
             },
             "gamePage": {
                 "settings": [
+                    "picture_mode", "picture_preset_scenario",
                     "front_sight_index", "mt_game_dynamic_ft", "mt_game_scope",
                     "mt_game_scope_night", "monitor_menu_fps_counter",
                     "monitor_menu_stopwatch", "monitor_menu_timer",
@@ -778,6 +780,10 @@ class DeviceFeaturesMixin:
             self.source_var_text = self._source_names.get(sid, f"未知 ({sid})")
             self.source_label.setText(self.source_var_text)
 
+        update_game_hint = getattr(self, "_update_game_mode_hint", None)
+        if callable(update_game_hint):
+            update_game_hint()
+
     def _apply_polled_jni_values(self, vals):
         self.current_vals.update(vals)
         if "g_disp__disp_back_light" in vals and "backlight" in self.sliders:
@@ -842,6 +848,10 @@ class DeviceFeaturesMixin:
                                     if v not in ("", "null", "N/A"):
                                         try: settings_vals[k] = int(v)
                                         except (TypeError, ValueError): settings_vals[k] = v
+
+                    if page_name == "gamePage":
+                        for key in GAME_FEATURE_KEYS:
+                            settings_vals.setdefault(key, 0)
 
                     jni_batch_vals = {}
                     jni_keys = cfg.get("jni", [])

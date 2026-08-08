@@ -351,26 +351,30 @@ class PagesMixin:
         title_row.addWidget(refresh_game_btn)
         layout.addLayout(title_row)
 
+        self.game_mode_hint_label = BodyLabel("当前画面模式未知；高亮值尚未确认是否生效。", container)
+        self.game_mode_hint_label.setStyleSheet("color: #f0b85a; font-size: 12px;")
+        layout.addWidget(self.game_mode_hint_label)
+
         # Game Switches
         self._btn_section(layout, "准星", [("关", 0, lambda _: self._fs(0))]+[(str(i), i, lambda _, v=i: self._fs(v)) for i in range(1,6)], state_key="front_sight_index")
         
         self._btn_section(layout, "动态准星", [
-            ("关", 0, lambda _: self._set("mt_game_dynamic_ft", 0, "动态准星: 关")),
-            ("开", 1, lambda _: self._set("mt_game_dynamic_ft", 1, "动态准星: 开")),
+            ("关", 0, lambda _: self._set_game_feature("mt_game_dynamic_ft", 0, "动态准星: 关")),
+            ("开", 1, lambda _: self._set_game_feature("mt_game_dynamic_ft", 1, "动态准星: 开")),
         ], state_key="mt_game_dynamic_ft")
 
         self._btn_section(layout, "狙击镜", [
-            ("关", 0, lambda _: self._set("mt_game_scope", 0, "狙击镜: 关")),
-            ("1.1x", 1, lambda _: self._set("mt_game_scope", 1, "狙击镜: 1.1x")),
-            ("1.3x", 3, lambda _: self._set("mt_game_scope", 3, "狙击镜: 1.3x")),
-            ("1.5x", 5, lambda _: self._set("mt_game_scope", 5, "狙击镜: 1.5x")),
-            ("1.7x", 7, lambda _: self._set("mt_game_scope", 7, "狙击镜: 1.7x")),
-            ("2.0x", 10, lambda _: self._set("mt_game_scope", 10, "狙击镜: 2.0x")),
+            ("关", 0, lambda _: self._set_game_feature("mt_game_scope", 0, "狙击镜: 关")),
+            ("1.1x", 1, lambda _: self._set_game_feature("mt_game_scope", 1, "狙击镜: 1.1x")),
+            ("1.3x", 3, lambda _: self._set_game_feature("mt_game_scope", 3, "狙击镜: 1.3x")),
+            ("1.5x", 5, lambda _: self._set_game_feature("mt_game_scope", 5, "狙击镜: 1.5x")),
+            ("1.7x", 7, lambda _: self._set_game_feature("mt_game_scope", 7, "狙击镜: 1.7x")),
+            ("2.0x", 10, lambda _: self._set_game_feature("mt_game_scope", 10, "狙击镜: 2.0x")),
         ], state_key="mt_game_scope")
 
         self._btn_section(layout, "狙击镜夜视", [
-            ("关", 0, lambda _: self._set("mt_game_scope_night", 0, "狙击镜夜视: 关")),
-            ("开", 1, lambda _: self._set("mt_game_scope_night", 1, "狙击镜夜视: 开")),
+            ("关", 0, lambda _: self._set_game_feature("mt_game_scope_night", 0, "狙击镜夜视: 关")),
+            ("开", 1, lambda _: self._set_game_feature("mt_game_scope_night", 1, "狙击镜夜视: 开")),
         ], state_key="mt_game_scope_night")
 
         self._btn_section(layout, "320Hz竞技模式", [

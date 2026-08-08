@@ -516,25 +516,30 @@ class App(PagesMixin, DisplayFeaturesMixin, DeviceFeaturesMixin, FluentWindow):
 
     def _toggle_4k_ui(self, state):
         enable = (state == 2)
-        if enable:
-            w = MessageBox("需要重启显示器", "启用 4K UI 需要重启显示器才能生效。\n\n点击确定后将设置分辨率为 3840×2160、DPI 640，并重启显示器。\n\n是否继续？", self)
-            accepted = w.exec()
-            w.deleteLater()
-            if not accepted:
-                self.chk_4k.blockSignals(True)
-                self.chk_4k.setChecked(False)
-                self.chk_4k.blockSignals(False)
-                return
+        action = "启用" if enable else "关闭"
+        target = "设置分辨率为 3840×2160、DPI 640" if enable else "恢复分辨率为 1920×1080、DPI 320"
+        w = MessageBox(
+            "需要重启显示器",
+            f"{action} 4K UI 需要重启显示器才能生效。\n\n点击确定后将{target}，并重启显示器。\n\n是否继续？",
+            self,
+        )
+        accepted = w.exec()
+        w.deleteLater()
+        if not accepted:
+            self.chk_4k.blockSignals(True)
+            self.chk_4k.setChecked(not enable)
+            self.chk_4k.blockSignals(False)
+            return
 
         def operation():
             with self.adb.transaction():
                 if enable:
                     self.adb.shell("wm size 3840x2160", check=True)
                     self.adb.shell("wm density 640", check=True)
-                    self.adb.shell("reboot", check=True)
                 else:
                     self.adb.shell("wm size 1920x1080", check=True)
                     self.adb.shell("wm density 320", check=True)
+                self.adb.shell("reboot", check=True)
 
         def success():
             if enable:
@@ -542,6 +547,7 @@ class App(PagesMixin, DisplayFeaturesMixin, DeviceFeaturesMixin, FluentWindow):
                 self.log("正在重启显示器...")
             else:
                 self.log("已恢复 1080p UI (1920×1080 / DPI 320)")
+                self.log("正在重启显示器...")
 
         def failure():
             self.chk_4k.blockSignals(True)

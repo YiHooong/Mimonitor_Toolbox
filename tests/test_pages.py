@@ -77,6 +77,54 @@ class PageContractTests(unittest.TestCase):
         window.deleteLater()
         _qt_application.processEvents()
 
+    def test_non_game_mode_marks_game_feature_highlight_as_memory(self):
+        from mimonitor_toolbox.main_window import App
+
+        with mock.patch.object(App, "register_global_hotkeys"), \
+                mock.patch.object(App, "setup_tray"):
+            window = App()
+
+        window._apply_polled_values({
+            "picture_mode": 14,
+            "picture_preset_scenario": 14,
+            "front_sight_index": 0,
+            "mt_game_dynamic_ft": 0,
+            "mt_game_scope": 5,
+            "mt_game_scope_night": 0,
+        })
+
+        hint = getattr(window, "game_mode_hint_label", None)
+        self.assertIsNotNone(hint)
+        self.assertIn("记忆值", hint.text())
+        self.assertIn("当前未生效", hint.text())
+        self.assertTrue(window.state_buttons["mt_game_scope"][5].isChecked())
+        window._cleanup_done = True
+        window.deleteLater()
+        _qt_application.processEvents()
+
+    def test_game_mode_marks_game_feature_highlight_as_current_value(self):
+        from mimonitor_toolbox.main_window import App
+
+        with mock.patch.object(App, "register_global_hotkeys"), \
+                mock.patch.object(App, "setup_tray"):
+            window = App()
+
+        window._apply_polled_values({
+            "picture_mode": 10,
+            "picture_preset_scenario": 25,
+            "front_sight_index": 1,
+            "mt_game_dynamic_ft": 0,
+            "mt_game_scope": 0,
+            "mt_game_scope_night": 0,
+        })
+
+        hint = getattr(window, "game_mode_hint_label", None)
+        self.assertIsNotNone(hint)
+        self.assertIn("当前生效值", hint.text())
+        window._cleanup_done = True
+        window.deleteLater()
+        _qt_application.processEvents()
+
 
 if __name__ == "__main__":
     unittest.main()

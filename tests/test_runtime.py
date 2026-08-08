@@ -17,6 +17,8 @@ import monitor_controller as app
 from mimonitor_toolbox import adb as adb_runtime
 from mimonitor_toolbox import core
 from mimonitor_toolbox import device_features
+from mimonitor_toolbox import display_features
+from mimonitor_toolbox import main_window
 from mimonitor_toolbox.network_scan import ProbeResult
 
 
@@ -554,6 +556,431 @@ class ScanLifecycleTests(unittest.TestCase):
 
 
 class StateMachineTests(unittest.TestCase):
+    def test_non_game_feature_cancel_restores_memory_without_adb_action(self):
+        dialogs = []
+        highlights = []
+        actions = []
+
+        class FakeDialog:
+            def __init__(self, title, content, parent):
+                dialogs.append((title, content))
+
+            def exec(self):
+                return False
+
+            def deleteLater(self):
+                pass
+
+        class FakeApp:
+            current_vals = {"picture_mode": 14, "mt_game_scope": 3}
+
+            def check_connection(self):
+                return True
+
+            def _optimistic_highlight(self, key, value):
+                highlights.append((key, value))
+
+            def _run_adb_action(self, *args):
+                actions.append(args)
+
+        setter = getattr(display_features.DisplayFeaturesMixin, "_set_game_feature", None)
+        self.assertIsNotNone(setter)
+        with mock.patch.object(display_features, "MessageBox", FakeDialog):
+            setter(FakeApp(), "mt_game_scope", 5, "狙击镜: 1.5x")
+
+        self.assertEqual(len(dialogs), 1)
+        self.assertIn("当前不是游戏模式", dialogs[0][1])
+        self.assertEqual(highlights, [("mt_game_scope", 3)])
+        self.assertEqual(actions, [])
+
+    def test_non_game_feature_off_updates_memory_without_switch_prompt(self):
+        commands = []
+        dialog_count = []
+
+        class FakeDialog:
+            def __init__(self, *args):
+                dialog_count.append(1)
+
+        class FakeAdb:
+            def transaction(self):
+                return nullcontext()
+
+            def put(self, key, value, check=False):
+                commands.append(("put", key, value, check))
+
+            def refresh_pq(self, check=False):
+                commands.append(("refresh", check))
+
+        class FakeApp:
+            adb = FakeAdb()
+            current_vals = {"picture_mode": 14, "front_sight_index": 2}
+
+            def check_connection(self):
+                return True
+
+            def _mark_adb_busy(self, duration):
+                pass
+
+            def _run_adb_action(self, label, operation, success, failure):
+                operation()
+                success()
+
+            def _optimistic_highlight(self, key, value):
+                pass
+
+            def log(self, message):
+                pass
+
+        setter = getattr(display_features.DisplayFeaturesMixin, "_set_game_feature", None)
+        self.assertIsNotNone(setter)
+        with mock.patch.object(display_features, "MessageBox", FakeDialog):
+            fake = FakeApp()
+            setter(fake, "front_sight_index", 0, "准星: 关", retrigger_game_mode=True)
+
+        self.assertEqual(dialog_count, [])
+        self.assertEqual(commands, [
+            ("put", "front_sight_index", "0", True),
+            ("refresh", True),
+        ])
+        self.assertEqual(fake.current_vals["picture_mode"], 14)
+        self.assertEqual(fake.current_vals["front_sight_index"], 0)
+
+    def test_non_game_feature_confirm_writes_value_before_switching_mode(self):
+        commands = []
+        logs = []
+
+        class FakeDialog:
+            def __init__(self, title, content, parent):
+                pass
+
+            def exec(self):
+                return True
+
+            def deleteLater(self):
+                pass
+
+        class FakeAdb:
+            def transaction(self):
+                return nullcontext()
+
+            def put(self, key, value, check=False):
+                commands.append((key, value, check))
+
+        class FakeApp:
+            adb = FakeAdb()
+            current_vals = {"picture_mode": 14, "mt_game_scope": 0}
+            _picture_mode_switch_seq = 0
+
+            def check_connection(self):
+                return True
+
+            def _mark_adb_busy(self, duration):
+                pass
+
+            def _run_adb_action(self, label, operation, success, failure):
+                operation()
+                success()
+
+            def _optimistic_highlight(self, key, value):
+                pass
+
+            def _highlight_mode(self, value):
+                pass
+
+            def _update_game_mode_hint(self):
+                pass
+
+            def _refresh_pages(self, *args, **kwargs):
+                pass
+
+            def log(self, message):
+                logs.append(message)
+
+        setter = getattr(display_features.DisplayFeaturesMixin, "_set_game_feature", None)
+        self.assertIsNotNone(setter)
+        with mock.patch.object(display_features, "MessageBox", FakeDialog):
+            fake = FakeApp()
+            setter(fake, "mt_game_scope", 5, "狙击镜: 1.5x")
+
+        self.assertEqual(commands, [
+            ("mt_game_scope", "5", True),
+            ("picture_mode", "10", True),
+        ])
+        self.assertEqual(fake.current_vals["mt_game_scope"], 5)
+        self.assertEqual(fake.current_vals["picture_mode"], 10)
+        self.assertEqual(fake._picture_mode_switch_seq, 1)
+        self.assertIn("已切换到游戏模式", logs)
+
+    def test_game_feature_dependencies_are_enabled_before_requested_feature(self):
+        cases = (
+            (
+                "mt_game_dynamic_ft", "动态准星: 开",
+                {"front_sight_index": 0, "mt_game_dynamic_ft": 0},
+                "front_sight_index", "准星 1",
+            ),
+            (
+                "mt_game_scope_night", "狙击镜夜视: 开",
+                {"mt_game_scope": 0, "mt_game_scope_night": 0},
+                "mt_game_scope", "狙击镜 1.1x",
+            ),
+        )
+
+        for key, message, feature_values, dependency_key, dependency_name in cases:
+            with self.subTest(key=key):
+                commands = []
+                dialogs = []
+
+                class FakeDialog:
+                    def __init__(self, title, content, parent):
+                        dialogs.append((title, content))
+
+                    def exec(self):
+                        return True
+
+                    def deleteLater(self):
+                        pass
+
+                class FakeAdb:
+                    def transaction(self):
+                        return nullcontext()
+
+                    def put(self, setting, value, check=False):
+                        commands.append(("put", setting, value, check))
+
+                    def refresh_pq(self, check=False):
+                        commands.append(("refresh", check))
+
+                class FakeApp:
+                    adb = FakeAdb()
+                    current_vals = {"picture_mode": 10, **feature_values}
+
+                    def check_connection(self):
+                        return True
+
+                    def _mark_adb_busy(self, duration):
+                        pass
+
+                    def _run_adb_action(self, label, operation, success, failure):
+                        operation()
+                        success()
+
+                    def _optimistic_highlight(self, state_key, value):
+                        pass
+
+                    def log(self, text):
+                        pass
+
+                with mock.patch.object(display_features, "MessageBox", FakeDialog):
+                    fake = FakeApp()
+                    display_features.DisplayFeaturesMixin._set_game_feature(
+                        fake, key, 1, message,
+                    )
+
+                self.assertEqual(len(dialogs), 1)
+                self.assertIn(dependency_name, dialogs[0][1])
+                self.assertEqual(commands, [
+                    ("put", dependency_key, "1", True),
+                    ("put", key, "1", True),
+                    ("refresh", True),
+                ])
+                self.assertEqual(fake.current_vals[dependency_key], 1)
+                self.assertEqual(fake.current_vals[key], 1)
+
+    def test_game_feature_dependency_cancel_runs_no_action(self):
+        actions = []
+        highlights = []
+
+        class FakeDialog:
+            def __init__(self, title, content, parent):
+                pass
+
+            def exec(self):
+                return False
+
+            def deleteLater(self):
+                pass
+
+        class FakeApp:
+            current_vals = {
+                "picture_mode": 10,
+                "front_sight_index": 0,
+                "mt_game_dynamic_ft": 0,
+            }
+
+            def check_connection(self):
+                return True
+
+            def _mark_adb_busy(self, duration):
+                pass
+
+            def _run_adb_action(self, *args):
+                actions.append(args)
+
+            def _optimistic_highlight(self, key, value):
+                highlights.append((key, value))
+
+        with mock.patch.object(display_features, "MessageBox", FakeDialog):
+            display_features.DisplayFeaturesMixin._set_game_feature(
+                FakeApp(), "mt_game_dynamic_ft", 1, "动态准星: 开",
+            )
+
+        self.assertEqual(actions, [])
+        self.assertEqual(highlights, [("mt_game_dynamic_ft", 0)])
+
+    def test_game_page_refresh_reads_mode_and_defaults_missing_features_to_off(self):
+        emitted = []
+
+        class FakeSignal:
+            def __init__(self, name):
+                self.name = name
+
+            def emit(self, *args):
+                emitted.append((self.name, args))
+
+        class FakeAdb:
+            def transaction(self):
+                return nullcontext()
+
+            def shell(self, command):
+                rows = []
+                if " picture_mode " in command:
+                    rows.append("picture_mode=14")
+                if " picture_preset_scenario " in command:
+                    rows.append("picture_preset_scenario=14")
+                rows.extend([
+                    "front_sight_index=null",
+                    "mt_game_dynamic_ft=null",
+                    "mt_game_scope=null",
+                    "mt_game_scope_night=null",
+                    "mitv.tvplayer.hdmi.last.source=23",
+                ])
+                return "\n".join(rows)
+
+            def jni_batch_get_or_single(self, keys):
+                return {}
+
+        class FakeApp:
+            adb_connected = True
+            _page_loading = set()
+            adb = FakeAdb()
+            values_signal = FakeSignal("values")
+            jni_values_signal = FakeSignal("jni")
+            page_refresh_finished = FakeSignal("finished")
+
+            def _mark_adb_busy(self, duration):
+                pass
+
+            def _show_loading_overlay(self, page_name):
+                pass
+
+            def log(self, message):
+                pass
+
+        fake = FakeApp()
+        device_features.DeviceFeaturesMixin.initialize_device_features(fake)
+        fake.adb_connected = True
+        fake.adb = FakeAdb()
+        fake.values_signal = FakeSignal("values")
+        fake.jni_values_signal = FakeSignal("jni")
+        fake.page_refresh_finished = FakeSignal("finished")
+
+        with mock.patch.object(device_features, "async_run", side_effect=lambda fn: fn()):
+            app.App._refresh_page_data(fake, "gamePage")
+
+        snapshots = [args[0] for name, args in emitted if name == "values"]
+        self.assertEqual(snapshots, [{
+            "picture_mode": 14,
+            "picture_preset_scenario": 14,
+            "front_sight_index": 0,
+            "mt_game_dynamic_ft": 0,
+            "mt_game_scope": 0,
+            "mt_game_scope_night": 0,
+            "mitv.tvplayer.hdmi.last.source": 23,
+        }])
+
+    def test_disabling_4k_ui_cancel_restores_checkbox_without_adb_action(self):
+        dialogs = []
+        actions = []
+
+        class FakeDialog:
+            def __init__(self, title, content, parent):
+                dialogs.append((title, content, parent))
+
+            def exec(self):
+                return False
+
+            def deleteLater(self):
+                pass
+
+        class FakeCheckBox:
+            checked = False
+
+            def blockSignals(self, blocked):
+                pass
+
+            def setChecked(self, checked):
+                self.checked = checked
+
+        class FakeApp:
+            chk_4k = FakeCheckBox()
+
+            def _run_adb_action(self, *args):
+                actions.append(args)
+
+        fake = FakeApp()
+        with mock.patch.object(main_window, "MessageBox", FakeDialog):
+            app.App._toggle_4k_ui(fake, 0)
+
+        self.assertEqual(len(dialogs), 1)
+        self.assertIn("关闭 4K UI", dialogs[0][1])
+        self.assertIn("1920×1080、DPI 320", dialogs[0][1])
+        self.assertTrue(fake.chk_4k.checked)
+        self.assertEqual(actions, [])
+
+    def test_disabling_4k_ui_confirm_restores_1080p_and_reboots(self):
+        commands = []
+        logs = []
+
+        class FakeDialog:
+            def __init__(self, title, content, parent):
+                pass
+
+            def exec(self):
+                return True
+
+            def deleteLater(self):
+                pass
+
+        class FakeAdb:
+            def transaction(self):
+                return nullcontext()
+
+            def shell(self, command, check=False):
+                commands.append((command, check))
+
+        class FakeApp:
+            adb = FakeAdb()
+
+            def _run_adb_action(self, label, operation, success, failure):
+                operation()
+                success()
+
+            def log(self, message):
+                logs.append(message)
+
+        with mock.patch.object(main_window, "MessageBox", FakeDialog):
+            app.App._toggle_4k_ui(FakeApp(), 0)
+
+        self.assertEqual(commands, [
+            ("wm size 1920x1080", True),
+            ("wm density 320", True),
+            ("reboot", True),
+        ])
+        self.assertEqual(logs, [
+            "已恢复 1080p UI (1920×1080 / DPI 320)",
+            "正在重启显示器...",
+        ])
+
     def test_hdr_tone_mapping_values_and_setter(self):
         self.assertEqual(core.HDR_TONE_MAPPING_UI_TO_MTK, {0: 5, 1: 0, 2: 2, 3: 1})
         calls = []

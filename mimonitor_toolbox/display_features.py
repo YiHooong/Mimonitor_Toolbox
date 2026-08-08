@@ -15,11 +15,17 @@ from .core import (
     PICTURE_MODE_GROUPS,
     PICTURE_SCENE_NAMES,
     XIAOMI_TO_MTK_COLOR_TEMP,
+    is_game_picture_mode,
     is_hdr_tone_mapping_picture_mode,
     load_settings,
     update_settings,
 )
 from .windows import query_windows_hdr_enabled
+
+_GAME_FEATURE_DEPENDENCIES = {
+    "mt_game_dynamic_ft": ("front_sight_index", 1, "准星 1"),
+    "mt_game_scope_night": ("mt_game_scope", 1, "狙击镜 1.1x"),
+}
 
 
 class DisplayFeaturesMixin:
@@ -869,6 +875,32 @@ class DisplayFeaturesMixin:
                 pass
         return None
 
+    def _is_game_mode_active(self):
+        current_vals = getattr(self, "current_vals", {})
+        return any(
+            is_game_picture_mode(current_vals.get(key))
+            for key in ("picture_mode", "picture_preset_scenario")
+        )
+
+    def _update_game_mode_hint(self):
+        label = getattr(self, "game_mode_hint_label", None)
+        if not label:
+            return
+        current_vals = getattr(self, "current_vals", {})
+        mode_known = any(
+            current_vals.get(key) not in (None, "", "null", "N/A")
+            for key in ("picture_mode", "picture_preset_scenario")
+        )
+        if not mode_known:
+            label.setText("当前画面模式未知；高亮值尚未确认是否生效。")
+            label.setStyleSheet("color: #f0b85a; font-size: 12px;")
+        elif DisplayFeaturesMixin._is_game_mode_active(self):
+            label.setText("当前为游戏模式；下方高亮为当前生效值。")
+            label.setStyleSheet("font-size: 12px;")
+        else:
+            label.setText("当前不是游戏模式；下方高亮为记忆值，功能当前未生效。")
+            label.setStyleSheet("color: #f0b85a; font-size: 12px;")
+
     def _update_hdr_tone_mapping_visibility(self, mode=None):
         card = getattr(self, "hdr_tone_mapping_card", None)
         if not card:
@@ -1004,6 +1036,93 @@ class DisplayFeaturesMixin:
                 self._optimistic_highlight(k, previous)
 
         self._run_adb_action(m.split(":", 1)[0], operation, success, failure)
+
+    def _confirm_switch_to_game_mode(self, feature_name):
+        w = MessageBox(
+            "需要游戏模式",
+            f"当前不是游戏模式，{feature_name}的设置只能在游戏模式下生效。\n\n是否切换到游戏模式并继续？",
+            self,
+        )
+        accepted = w.exec()
+        w.deleteLater()
+        return bool(accepted)
+
+    def _confirm_game_feature_dependency(self, feature_name, dependency_name):
+        w = MessageBox(
+            "需要开启前置功能",
+            f"{feature_name}需要先启用{dependency_name}才能生效。\n\n是否同时启用{dependency_name}？",
+            self,
+        )
+        accepted = w.exec()
+        w.deleteLater()
+        return bool(accepted)
+
+    def _set_game_feature(self, key, value, message, retrigger_game_mode=False):
+        if not self.check_connection():
+            return
+        previous = self.current_vals.get(key, 0)
+        previous_values = {key: previous}
+        game_mode_active = DisplayFeaturesMixin._is_game_mode_active(self)
+        switch_to_game = value != 0 and not game_mode_active
+        feature_name = message.split(":", 1)[0]
+        if switch_to_game:
+            if not DisplayFeaturesMixin._confirm_switch_to_game_mode(self, feature_name):
+                self._optimistic_highlight(key, previous)
+                return
+
+        updates = {}
+        dependency = _GAME_FEATURE_DEPENDENCIES.get(key) if value != 0 else None
+        if dependency:
+            dependency_key, dependency_value, dependency_name = dependency
+            try:
+                dependency_enabled = int(self.current_vals.get(dependency_key, 0)) != 0
+            except (TypeError, ValueError):
+                dependency_enabled = False
+            if not dependency_enabled:
+                if not DisplayFeaturesMixin._confirm_game_feature_dependency(
+                    self, feature_name, dependency_name,
+                ):
+                    self._optimistic_highlight(key, previous)
+                    return
+                previous_values[dependency_key] = self.current_vals.get(dependency_key, 0)
+                updates[dependency_key] = dependency_value
+        updates[key] = value
+
+        self._mark_adb_busy(3.0 if switch_to_game else 2.5)
+        if switch_to_game:
+            self._picture_mode_switch_seq = getattr(self, "_picture_mode_switch_seq", 0) + 1
+
+        def operation():
+            with self.adb.transaction():
+                for setting, setting_value in updates.items():
+                    self.adb.put(setting, str(setting_value), check=True)
+                if switch_to_game:
+                    self.adb.put("picture_mode", "10", check=True)
+                elif retrigger_game_mode and game_mode_active:
+                    self.adb.put("picture_mode", "14", check=True)
+                    time.sleep(0.5)
+                    self.adb.put("picture_mode", "10", check=True)
+                else:
+                    self.adb.refresh_pq(check=True)
+
+        def success():
+            self.current_vals.update(updates)
+            for setting, setting_value in updates.items():
+                self._optimistic_highlight(setting, setting_value)
+            self.log(message)
+            if switch_to_game:
+                self.current_vals["picture_mode"] = 10
+                self._highlight_mode(10)
+                self._update_game_mode_hint()
+                self.log("已切换到游戏模式")
+                self._refresh_pages(("picturePage", "gamePage"), delay_ms=1200, force=True)
+
+        def failure():
+            self.current_vals.update(previous_values)
+            for setting, setting_value in previous_values.items():
+                self._optimistic_highlight(setting, setting_value)
+
+        self._run_adb_action(message.split(":", 1)[0], operation, success, failure)
 
     def _jni(self, jk, v, sk, m, osd_sk=None):
         if not self.check_connection(): return
@@ -1154,28 +1273,12 @@ class DisplayFeaturesMixin:
         self._run_adb_action(title, operation, success, failure)
 
     def _fs(self, v):
-        if not self.check_connection(): return
-        self._mark_adb_busy(2.5)
-        previous = self._take_control_previous("front_sight_index")
-
-        def operation():
-            with self.adb.transaction():
-                self.adb.put("front_sight_index", str(v), check=True)
-                if self.adb.get("picture_mode", check=True) == "10":
-                    self.adb.put("picture_mode", "14", check=True)
-                    time.sleep(0.5)
-                    self.adb.put("picture_mode", "10", check=True)
-
-        def success():
-            self.log(f"准星: {'关' if v==0 else v}")
-            self.current_vals["front_sight_index"] = v
-            self._optimistic_highlight("front_sight_index", v)
-
-        def failure():
-            if previous is not None:
-                self._optimistic_highlight("front_sight_index", previous)
-
-        self._run_adb_action("准星", operation, success, failure)
+        self._set_game_feature(
+            "front_sight_index",
+            v,
+            f"准星: {'关' if v == 0 else v}",
+            retrigger_game_mode=True,
+        )
 
     def _get_input_source(self, check=False):
         """获取当前输入源"""

@@ -165,6 +165,22 @@ PICTURE_MODE_GROUPS = {
     10: {10, 25, 26, 27, 28, 29},
     9: {9},
 }
+GAME_FEATURE_KEYS = (
+    "front_sight_index",
+    "mt_game_dynamic_ft",
+    "mt_game_scope",
+    "mt_game_scope_night",
+)
+GAME_PICTURE_MODES = frozenset(PICTURE_MODE_GROUPS[10]) | {4, 15, 19}
+
+
+def is_game_picture_mode(value):
+    try:
+        return int(value) in GAME_PICTURE_MODES
+    except (TypeError, ValueError):
+        return False
+
+
 PICTURE_SCENE_NAMES = {
     9: "电影",
     10: "游戏",

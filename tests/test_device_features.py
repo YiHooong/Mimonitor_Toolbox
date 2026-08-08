@@ -1,3 +1,4 @@
+import os
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -36,8 +37,11 @@ class TerminalLaunchTests(unittest.TestCase):
         opener = getattr(device_features.DeviceFeaturesMixin, "_open_adb_cmd", None)
         self.assertIsNotNone(opener)
 
+        adb_path = os.path.abspath(os.path.join("test-runtime", "adb.exe"))
+        adb_dir = os.path.dirname(adb_path)
+
         with mock.patch.object(device_features.sys, "platform", "win32"), \
-                mock.patch.object(device_features, "ADB", "/opt/mimonitor/adb.exe"), \
+                mock.patch.object(device_features, "ADB", adb_path), \
                 mock.patch.object(device_features, "ADB_SERVER_PORT", "5038"), \
                 mock.patch.object(device_features.subprocess, "Popen") as popen:
             opener(host)
@@ -48,7 +52,7 @@ class TerminalLaunchTests(unittest.TestCase):
                 "/k",
                 "title Mimonitor ADB CMD & doskey adb=adb.exe -P 5038 $*",
             ],
-            cwd="/opt/mimonitor",
+            cwd=adb_dir,
             creationflags=device_features.CREATE_NEW_CONSOLE,
         )
         self.assertEqual(messages, ["正在打开 ADB CMD..."])
