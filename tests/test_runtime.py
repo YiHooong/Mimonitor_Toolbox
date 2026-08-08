@@ -1,4 +1,5 @@
 import json
+import ipaddress
 import os
 import tempfile
 import threading
@@ -7,9 +8,16 @@ import unittest
 from contextlib import nullcontext
 from unittest import mock
 
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QSystemTrayIcon
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import monitor_controller as app
+from mimonitor_toolbox import adb as adb_runtime
+from mimonitor_toolbox import core
+from mimonitor_toolbox import device_features
+from mimonitor_toolbox.network_scan import ProbeResult
 
 
 class FakePopen:
@@ -53,16 +61,16 @@ class FakePopen:
 class AdbRuntimeTests(unittest.TestCase):
     def setUp(self):
         FakePopen.reset()
-        app.unblock_adb_spawns()
-        with app._adb_process_lock:
-            app._adb_processes.clear()
+        adb_runtime.unblock_adb_spawns()
+        with adb_runtime._adb_process_lock:
+            adb_runtime._adb_processes.clear()
 
     def tearDown(self):
-        app.unblock_adb_spawns()
+        adb_runtime.unblock_adb_spawns()
 
     def test_adb_processes_are_serialized(self):
-        with mock.patch.object(app.subprocess, "Popen", FakePopen):
-            workers = [threading.Thread(target=app.adb_run, args=(["version"],)) for _ in range(12)]
+        with mock.patch.object(adb_runtime.subprocess, "Popen", FakePopen):
+            workers = [threading.Thread(target=adb_runtime.adb_run, args=(["version"],)) for _ in range(12)]
             for worker in workers:
                 worker.start()
             for worker in workers:
@@ -73,23 +81,23 @@ class AdbRuntimeTests(unittest.TestCase):
         self.assertEqual(FakePopen.max_active, 1)
 
     def test_nested_adb_transaction_is_reentrant(self):
-        with mock.patch.object(app.subprocess, "Popen", FakePopen):
-            with app.Adb("127.0.0.1").transaction():
-                self.assertEqual(app.adb_run(["version"], check=True), "ok")
+        with mock.patch.object(adb_runtime.subprocess, "Popen", FakePopen):
+            with adb_runtime.Adb("127.0.0.1").transaction():
+                self.assertEqual(adb_runtime.adb_run(["version"], check=True), "ok")
 
     def test_shutdown_block_prevents_new_process(self):
-        with mock.patch.object(app.subprocess, "Popen", FakePopen):
-            app.block_adb_spawns()
+        with mock.patch.object(adb_runtime.subprocess, "Popen", FakePopen):
+            adb_runtime.block_adb_spawns()
             with self.assertRaisesRegex(RuntimeError, "正在退出"):
-                app.adb_run(["version"], check=True)
+                adb_runtime.adb_run(["version"], check=True)
         self.assertEqual(FakePopen.created, 0)
 
     def test_strict_adb_failure_raises(self):
         FakePopen.return_code = 7
         FakePopen.stderr = "device offline"
-        with mock.patch.object(app.subprocess, "Popen", FakePopen):
+        with mock.patch.object(adb_runtime.subprocess, "Popen", FakePopen):
             with self.assertRaisesRegex(RuntimeError, "device offline"):
-                app.adb_run(["version"], check=True)
+                adb_runtime.adb_run(["version"], check=True)
 
     def test_adb_connect_rejects_offline_device_state(self):
         calls = []
@@ -102,8 +110,8 @@ class AdbRuntimeTests(unittest.TestCase):
                 return "offline"
             return ""
 
-        with mock.patch.object(app, "adb_run", side_effect=fake_adb_run):
-            self.assertFalse(app.Adb("192.168.5.205").connect())
+        with mock.patch.object(adb_runtime, "adb_run", side_effect=fake_adb_run):
+            self.assertFalse(adb_runtime.Adb("192.168.5.205").connect())
 
         self.assertEqual(calls, [
             ["connect", "192.168.5.205:5555"],
@@ -121,8 +129,8 @@ class AdbRuntimeTests(unittest.TestCase):
                 return "offline" if len([c for c in calls if c[0][-1] == "get-state"]) == 1 else "device"
             return ""
 
-        with mock.patch.object(app, "adb_run", side_effect=fake_adb_run):
-            self.assertEqual(app.Adb("192.168.5.205").ensure_connected(), (True, "device"))
+        with mock.patch.object(adb_runtime, "adb_run", side_effect=fake_adb_run):
+            self.assertEqual(adb_runtime.Adb("192.168.5.205").ensure_connected(), (True, "device"))
 
         self.assertEqual(calls, [
             (["-s", "192.168.5.205:5555", "get-state"], 2, False),
@@ -132,8 +140,8 @@ class AdbRuntimeTests(unittest.TestCase):
 
     def test_connected_status_with_adb_error_is_normalized(self):
         text = "已连接: adb.exe: device offline"
-        self.assertFalse(app.is_connected_status_text(text))
-        self.assertEqual(app.normalize_status_text(text), "未连接（设备离线）")
+        self.assertFalse(adb_runtime.is_connected_status_text(text))
+        self.assertEqual(adb_runtime.normalize_status_text(text), "未连接（设备离线）")
 
     def test_keepalive_marks_offline_device_disconnected(self):
         events = []
@@ -157,9 +165,9 @@ class AdbRuntimeTests(unittest.TestCase):
             return "failed to connect"
 
         fake = FakeApp()
-        with mock.patch.object(app, "adb_device_state", side_effect=["offline", "offline"]), \
-                mock.patch.object(app, "adb_run", side_effect=fake_adb_run), \
-                mock.patch.object(app, "async_run", side_effect=lambda fn: fn()):
+        with mock.patch.object(device_features, "adb_device_state", side_effect=["offline", "offline"]), \
+                mock.patch.object(device_features, "adb_run", side_effect=fake_adb_run), \
+                mock.patch.object(device_features, "async_run", side_effect=lambda fn: fn()):
             app.App._keep_adb_alive(fake)
 
         self.assertFalse(fake._adb_keepalive_checking)
@@ -174,13 +182,13 @@ class AdbRuntimeTests(unittest.TestCase):
 
     def test_adb_server_probe_does_not_start_adb(self):
         fake_socket = mock.Mock()
-        with mock.patch.object(app.socket, "create_connection", return_value=fake_socket) as connect:
-            self.assertTrue(app.is_adb_server_alive())
-        connect.assert_called_once_with(("127.0.0.1", int(app.ADB_SERVER_PORT)), timeout=0.2)
+        with mock.patch.object(adb_runtime.socket, "create_connection", return_value=fake_socket) as connect:
+            self.assertTrue(adb_runtime.is_adb_server_alive())
+        connect.assert_called_once_with(("127.0.0.1", int(adb_runtime.ADB_SERVER_PORT)), timeout=0.2)
         fake_socket.close.assert_called_once_with()
 
-        with mock.patch.object(app.socket, "create_connection", side_effect=ConnectionRefusedError):
-            self.assertFalse(app.is_adb_server_alive())
+        with mock.patch.object(adb_runtime.socket, "create_connection", side_effect=ConnectionRefusedError):
+            self.assertFalse(adb_runtime.is_adb_server_alive())
 
     def test_dead_adb_server_is_restarted_and_device_reconnected(self):
         events = []
@@ -204,9 +212,9 @@ class AdbRuntimeTests(unittest.TestCase):
             return "connected to 192.168.5.205:5555"
 
         fake = FakeApp()
-        with mock.patch.object(app, "is_adb_server_alive", side_effect=[False, True]), \
-                mock.patch.object(app, "adb_run", side_effect=fake_adb_run), \
-                mock.patch.object(app, "async_run", side_effect=lambda fn: fn()):
+        with mock.patch.object(device_features, "is_adb_server_alive", side_effect=[False, True]), \
+                mock.patch.object(device_features, "adb_run", side_effect=fake_adb_run), \
+                mock.patch.object(device_features, "async_run", side_effect=lambda fn: fn()):
             app.App._monitor_adb_server(fake)
 
         self.assertTrue(fake._adb_server_monitor_checking)
@@ -275,7 +283,7 @@ class AdbRuntimeTests(unittest.TestCase):
         def operation():
             operation_calls.append("run")
 
-        with mock.patch.object(app, "async_run", side_effect=lambda fn: fn()):
+        with mock.patch.object(device_features, "async_run", side_effect=lambda fn: fn()):
             app.App._run_adb_action(FakeApp(), "测试操作", operation)
 
         self.assertEqual(operation_calls, ["run"])
@@ -305,23 +313,88 @@ class AdbRuntimeTests(unittest.TestCase):
         def operation():
             operation_calls.append("run")
 
-        with mock.patch.object(app, "async_run", side_effect=lambda fn: fn()):
+        with mock.patch.object(device_features, "async_run", side_effect=lambda fn: fn()):
             app.App._run_adb_action(FakeApp(), "测试操作", operation)
 
         self.assertEqual(operation_calls, [])
         self.assertEqual(events[0], ("未连接（设备离线）",))
         self.assertFalse(events[1][1])
 
+    def test_scan_adb_sorts_devices_and_cleans_temporary_transports(self):
+        source_ip = ipaddress.IPv4Address("192.168.5.2")
+        probe_results = [
+            ProbeResult(ipaddress.IPv4Address("192.168.5.30"), source_ip),
+            ProbeResult(ipaddress.IPv4Address("192.168.5.10"), source_ip),
+            ProbeResult(ipaddress.IPv4Address("192.168.5.20"), source_ip),
+            ProbeResult(ipaddress.IPv4Address("192.168.5.40"), source_ip),
+            ProbeResult(ipaddress.IPv4Address("192.168.5.50"), source_ip),
+        ]
+        models = {
+            "192.168.5.10:5555": "MiTV-A",
+            "192.168.5.20:5555": "mitv-B",
+            "192.168.5.30:5555": "Pixel 9",
+        }
+        states = {
+            "192.168.5.10:5555": "device",
+            "192.168.5.20:5555": "device",
+            "192.168.5.30:5555": "device",
+            "192.168.5.40:5555": "unauthorized",
+            "192.168.5.50:5555": "offline",
+        }
+        commands = []
+        callbacks = []
+
+        def fake_adb_run(args, timeout=10, check=False):
+            commands.append(args)
+            if args[0] == "connect":
+                return f"connected to {args[1]}"
+            if args[0] == "disconnect":
+                return f"disconnected {args[1]}"
+            if args[-1] == "getprop ro.product.model":
+                return models[args[1]]
+            return ""
+
+        with mock.patch.object(adb_runtime, "get_windows_scan_networks", return_value=[object()]), \
+                mock.patch.object(adb_runtime, "build_probe_targets", return_value=[object()]), \
+                mock.patch.object(adb_runtime, "probe_tcp_targets", return_value=probe_results), \
+                mock.patch.object(adb_runtime, "adb_run", side_effect=fake_adb_run), \
+                mock.patch.object(adb_runtime, "adb_device_state", side_effect=lambda serial, timeout=3: states[serial]):
+            found = adb_runtime.scan_adb(
+                cb=lambda ip, model: callbacks.append((ip, model)),
+                cancel_event=threading.Event(),
+            )
+
+        expected = [
+            ("192.168.5.10", "MiTV-A"),
+            ("192.168.5.20", "mitv-B"),
+            ("192.168.5.30", "Pixel 9"),
+        ]
+        self.assertEqual(found, expected)
+        self.assertEqual(callbacks, expected)
+        self.assertTrue(adb_runtime.is_mitv_model("MiTV-A"))
+        self.assertTrue(adb_runtime.is_mitv_model("mitv-B"))
+        self.assertFalse(adb_runtime.is_mitv_model("Pixel 9"))
+        self.assertEqual(
+            [args[1] for args in commands if args[0] == "disconnect"],
+            [
+                "192.168.5.10:5555",
+                "192.168.5.20:5555",
+                "192.168.5.30:5555",
+                "192.168.5.40:5555",
+                "192.168.5.50:5555",
+            ],
+        )
+
 
 class SettingsTests(unittest.TestCase):
     def test_concurrent_updates_are_atomic(self):
         with tempfile.TemporaryDirectory() as folder:
             config_path = os.path.join(folder, "config.json")
-            with mock.patch.object(app, "get_settings_path", return_value=config_path):
+            with mock.patch.object(core, "get_settings_path", return_value=config_path):
                 results = []
 
                 def update(index):
-                    results.append(app.update_settings({f"key_{index}": index}))
+                    results.append(core.update_settings({f"key_{index}": index}))
 
                 workers = [threading.Thread(target=update, args=(index,)) for index in range(40)]
                 for worker in workers:
@@ -331,7 +404,7 @@ class SettingsTests(unittest.TestCase):
                     self.assertFalse(worker.is_alive())
 
                 self.assertTrue(all(results))
-                settings = app.load_settings()
+                settings = core.load_settings()
                 for index in range(40):
                     self.assertEqual(settings[f"key_{index}"], index)
 
@@ -340,9 +413,149 @@ class SettingsTests(unittest.TestCase):
                 self.assertFalse([name for name in os.listdir(folder) if name.endswith(".tmp")])
 
 
+class ScanLifecycleTests(unittest.TestCase):
+    def test_finish_scan_auto_connects_first_mitv_only(self):
+        emitted = []
+        selected = []
+        updated = []
+
+        class FakeSignal:
+            def emit(self, *args):
+                emitted.append(args)
+
+        class FakeButton:
+            enabled = False
+
+            def setEnabled(self, enabled):
+                self.enabled = enabled
+
+        class FakeApp:
+            _scan_id = 7
+            _scan_running = True
+            _scan_cancel_event = threading.Event()
+            adb_connected = False
+            status_signal = FakeSignal()
+            scan_btn = FakeButton()
+
+            def _update_scanned_devices(self, scan_id, devices):
+                updated.append((scan_id, list(devices)))
+
+            def _on_dev_sel(self, index):
+                selected.append(index)
+
+            def log(self, message):
+                pass
+
+        devices = [
+            ("192.168.5.2", "Pixel 9"),
+            ("192.168.5.10", "MiTV-A"),
+            ("192.168.5.20", "mitv-B"),
+        ]
+
+        fake = FakeApp()
+        app.App._finish_scan(fake, 7, "completed", devices, "")
+
+        self.assertFalse(fake._scan_running)
+        self.assertIsNone(fake._scan_cancel_event)
+        self.assertTrue(fake.scan_btn.enabled)
+        self.assertEqual(updated, [(7, devices)])
+        self.assertEqual(emitted, [("扫描完成: 3台",)])
+        self.assertEqual(selected, [1])
+
+    def test_stale_scan_completion_is_ignored(self):
+        class FakeApp:
+            _scan_id = 8
+
+            def _update_scanned_devices(self, scan_id, devices):
+                raise AssertionError("旧扫描不应更新设备列表")
+
+            def _on_dev_sel(self, index):
+                raise AssertionError("旧扫描不应触发连接")
+
+        app.App._finish_scan(FakeApp(), 7, "completed", [("192.168.5.10", "MiTV")], "")
+
+    def test_cancel_scan_invalidates_worker_and_restores_button(self):
+        logs = []
+
+        class FakeButton:
+            enabled = False
+
+            def setEnabled(self, enabled):
+                self.enabled = enabled
+
+        class FakeApp:
+            _scan_id = 3
+            _scan_running = True
+            _scan_cancel_event = threading.Event()
+            scan_btn = FakeButton()
+
+            def log(self, message):
+                logs.append(message)
+
+        fake = FakeApp()
+        original_event = fake._scan_cancel_event
+
+        self.assertTrue(app.App._cancel_scan(fake, "手动连接"))
+        self.assertTrue(original_event.is_set())
+        self.assertEqual(fake._scan_id, 4)
+        self.assertFalse(fake._scan_running)
+        self.assertTrue(fake.scan_btn.enabled)
+        self.assertEqual(logs, ["取消内网扫描: 手动连接"])
+
+    def test_scan_status_does_not_clear_connected_state(self):
+        class FakeLabel:
+            def setText(self, text):
+                self.text = text
+
+            def setStyleSheet(self, style):
+                self.style = style
+
+        class FakeApp:
+            adb_connected = True
+            status_label = FakeLabel()
+
+            def setWindowTitle(self, title):
+                self.title = title
+
+        fake = FakeApp()
+        app.App._on_status(fake, "扫描完成: 1台")
+
+        self.assertTrue(fake.adb_connected)
+        self.assertEqual(fake.status_label.text, "扫描完成: 1台")
+
+    def test_duplicate_scan_request_is_ignored(self):
+        logs = []
+
+        class FakeApp:
+            adb_connected = False
+            _scan_running = True
+
+            def log(self, message):
+                logs.append(message)
+
+        app.App.scan_net(FakeApp())
+
+        self.assertEqual(logs, ["内网扫描已在进行中，忽略重复请求"])
+
+    def test_scan_request_is_ignored_while_connection_is_in_progress(self):
+        logs = []
+
+        class FakeApp:
+            adb_connected = False
+            _connection_in_progress = True
+            _scan_running = False
+
+            def log(self, message):
+                logs.append(message)
+
+        app.App.scan_net(FakeApp())
+
+        self.assertEqual(logs, ["设备正在连接，跳过内网扫描"])
+
+
 class StateMachineTests(unittest.TestCase):
     def test_hdr_tone_mapping_values_and_setter(self):
-        self.assertEqual(app.HDR_TONE_MAPPING_UI_TO_MTK, {0: 5, 1: 0, 2: 2, 3: 1})
+        self.assertEqual(core.HDR_TONE_MAPPING_UI_TO_MTK, {0: 5, 1: 0, 2: 2, 3: 1})
         calls = []
 
         class FakeAdb:
@@ -397,8 +610,8 @@ class StateMachineTests(unittest.TestCase):
         self.assertEqual(fake.current_vals["settings_display_hdr_color_tone"], 2)
 
     def test_hdr_tone_mapping_visibility_follows_picture_scene(self):
-        self.assertFalse(app.is_hdr_tone_mapping_picture_mode(14))
-        self.assertTrue(app.is_hdr_tone_mapping_picture_mode(18))
+        self.assertFalse(core.is_hdr_tone_mapping_picture_mode(14))
+        self.assertTrue(core.is_hdr_tone_mapping_picture_mode(18))
 
         class FakeCard:
             visible = None
@@ -535,7 +748,7 @@ class StateMachineTests(unittest.TestCase):
             def log(self, message):
                 pass
 
-        with mock.patch.object(app, "async_run", side_effect=lambda fn: fn()):
+        with mock.patch.object(device_features, "async_run", side_effect=lambda fn: fn()):
             app.App._refresh_page_data(FakeApp(), "picturePage")
 
         self.assertEqual(FakeApp.adb.depth, 0)
@@ -556,7 +769,7 @@ class StateMachineTests(unittest.TestCase):
                 return "2"
 
         fake = FakeAdb()
-        vals = app.Adb.jni_batch_get_or_single(fake, ["a", "b"])
+        vals = adb_runtime.Adb.jni_batch_get_or_single(fake, ["a", "b"])
         self.assertEqual(vals, {"a": 1, "b": 2})
         self.assertEqual(calls, [("batch", ("a", "b")), ("single", "b", False)])
 
@@ -565,7 +778,7 @@ class StateMachineTests(unittest.TestCase):
 
         class FakeApp:
             def windowState(self):
-                return app.Qt.WindowState.WindowNoState
+                return Qt.WindowState.WindowNoState
 
             def isVisible(self):
                 return True
@@ -576,7 +789,7 @@ class StateMachineTests(unittest.TestCase):
             def show_and_raise(self):
                 calls.append("show")
 
-        app.App.on_tray_activated(FakeApp(), app.QSystemTrayIcon.ActivationReason.Trigger)
+        app.App.on_tray_activated(FakeApp(), QSystemTrayIcon.ActivationReason.Trigger)
         self.assertEqual(calls, ["hide"])
 
     def test_tray_click_restores_hidden_window(self):
@@ -584,7 +797,7 @@ class StateMachineTests(unittest.TestCase):
 
         class FakeApp:
             def windowState(self):
-                return app.Qt.WindowState.WindowNoState
+                return Qt.WindowState.WindowNoState
 
             def isVisible(self):
                 return False
@@ -595,7 +808,7 @@ class StateMachineTests(unittest.TestCase):
             def show_and_raise(self):
                 calls.append("show")
 
-        app.App.on_tray_activated(FakeApp(), app.QSystemTrayIcon.ActivationReason.Trigger)
+        app.App.on_tray_activated(FakeApp(), QSystemTrayIcon.ActivationReason.Trigger)
         self.assertEqual(calls, ["show"])
 
     def test_restore_checks_adb_when_connected(self):

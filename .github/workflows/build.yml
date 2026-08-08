@@ -28,7 +28,9 @@ jobs:
         run: python -m pip install -r requirements-build.txt
 
       - name: Validate source
-        run: python -m py_compile monitor_controller.py
+        shell: pwsh
+        run: |
+          python -m compileall -q monitor_controller.py mimonitor_toolbox
 
       - name: Run tests
         env:

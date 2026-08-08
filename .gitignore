@@ -1,11 +1,6 @@
 __pycache__/
-.ruff_cache/
-tests/
 *.pyc
-dist/
-build/
-*.spec
-!MonitorToolbox.spec
-logs/
+.ruff_cache/
+/build/
+/dist/
 *.Zone.Identifier
-ok.py
