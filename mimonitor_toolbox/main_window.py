@@ -19,8 +19,10 @@ from .adb import (
     adb_text_has_disconnected_marker,
     block_adb_spawns,
     cleanup_adb_processes,
+    drain_startup_warnings,
     is_connected_status_text,
     normalize_status_text,
+    set_async_error_handler,
     unblock_adb_spawns,
 )
 from .core import (
@@ -113,12 +115,15 @@ class App(PagesMixin, DisplayFeaturesMixin, DeviceFeaturesMixin, FluentWindow):
         self.resume_reconnect_finished.connect(self._finish_resume_reconnect_attempt)
         self.connection_recovery_requested.connect(self._handle_connection_recovery_request)
         self.reconnect_target_probe_finished.connect(self._finish_reconnect_target_probe)
+        set_async_error_handler(self._report_background_error)
 
         # Setup layout and components
         self.osd = OsdHud(self)
         self.setup_ui()
         self.setup_tray()
         self.initialize_display_features()
+        for warning in drain_startup_warnings():
+            self.log_signal.emit(warning)
         self.register_global_hotkeys()
 
         # 页面切换时按需加载数据
@@ -378,6 +383,7 @@ class App(PagesMixin, DisplayFeaturesMixin, DeviceFeaturesMixin, FluentWindow):
         if getattr(self, "_cleanup_done", False):
             return
         self._cleanup_done = True
+        set_async_error_handler(None)
         self._invalidate_connection_intent()
         self._cancel_resume_reconnect()
         self._cancel_scan("程序退出")
@@ -410,7 +416,7 @@ class App(PagesMixin, DisplayFeaturesMixin, DeviceFeaturesMixin, FluentWindow):
             with _adb_command_lock:
                 try:
                     if self.adb.ip:
-                        adb_run(["disconnect", f"{self.adb.ip}:5555"], timeout=3)
+                        adb_run(["disconnect", self.adb.serial], timeout=3)
                 except Exception:
                     pass
                 block_adb_spawns()
@@ -483,6 +489,11 @@ class App(PagesMixin, DisplayFeaturesMixin, DeviceFeaturesMixin, FluentWindow):
                 adb_runtime._log_file.write(text + "\n")
                 adb_runtime._log_file.flush()
             except Exception: pass
+
+    def _report_background_error(self, error):
+        self.log_signal.emit(
+            f"后台任务异常: {type(error).__name__}: {error}"
+        )
 
     def _toggle_log_file(self, state):
         adb_runtime._log_to_file_enabled = (state == 2)

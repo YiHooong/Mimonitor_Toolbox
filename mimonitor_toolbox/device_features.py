@@ -22,6 +22,7 @@ from .adb import (
     adb_text_has_disconnected_marker,
     async_run,
     disconnected_status_text,
+    format_adb_serial,
     is_adb_server_alive,
     is_mitv_model,
     scan_adb,
@@ -236,7 +237,7 @@ class DeviceFeaturesMixin:
                     if not self._connection_intent_is_current(intent_generation, ip):
                         detail = "连接请求已取消"
                         return
-                    serial = f"{ip}:5555"
+                    serial = format_adb_serial(ip)
                     state = adb_device_state(serial, timeout=3)
                     if state != "device":
                         if not self._connection_intent_is_current(intent_generation, ip):
@@ -383,7 +384,9 @@ class DeviceFeaturesMixin:
                     if not self._connection_intent_is_current(intent_generation, ip):
                         self.adb_server_event.emit("cancelled", "")
                         return
-                    reconnect_result = adb_run(["connect", f"{ip}:5555"], timeout=5)
+                    reconnect_result = adb_run(
+                        ["connect", format_adb_serial(ip)], timeout=5
+                    )
                 self.adb_server_event.emit("recovered", reconnect_result)
             except Exception as e:
                 self.adb_server_event.emit("failed", str(e))
@@ -465,7 +468,7 @@ class DeviceFeaturesMixin:
                 with self.adb.transaction():
                     if not self._connection_intent_is_current(intent_generation, ip):
                         return
-                    serial = f"{ip}:5555"
+                    serial = format_adb_serial(ip)
                     state = adb_device_state(serial, timeout=3)
                     if state == "device":
                         return
@@ -583,7 +586,7 @@ class DeviceFeaturesMixin:
             self.adb.ip = ""
 
             def do():
-                adb_run(["disconnect", f"{ip}:5555"])
+                adb_run(["disconnect", format_adb_serial(ip)])
                 self.status_signal.emit("未连接")
                 self.log("连接已断开")
             async_run(do)
@@ -800,7 +803,7 @@ class DeviceFeaturesMixin:
             self._show_message_box("error", "错误", "请先连接显示器！")
             return
         self.log("正在打开 ADB Shell 终端...")
-        shell_args = ["-s", f"{self.adb.ip}:5555", "shell"]
+        shell_args = ["-s", format_adb_serial(self.adb.ip), "shell"]
         shell_cmd = adb_command_text(shell_args)
         if sys.platform == "win32":
             subprocess.Popen(f"start cmd /k {shell_cmd}", shell=True)
@@ -974,7 +977,7 @@ class DeviceFeaturesMixin:
         def do():
             try:
                 with self.adb.transaction():
-                    serial = f"{self.adb.ip}:5555"
+                    serial = format_adb_serial(self.adb.ip)
                     r = adb_run(["-s", serial, "install", "-r", "-d", apk_path], timeout=90)
                     if "Success" not in r:
                         raise RuntimeError(r or "adb install 没有返回成功")
@@ -1009,7 +1012,10 @@ class DeviceFeaturesMixin:
             self.apk_install_dialog = InstallProgressDialog(apk_name, self)
             self.apk_install_dialog.show()
             def do():
-                r = adb_run(["-s", f"{self.adb.ip}:5555", "install", "-r", apk_path], timeout=60)
+                r = adb_run(
+                    ["-s", format_adb_serial(self.adb.ip), "install", "-r", apk_path],
+                    timeout=60,
+                )
                 if "Success" in r:
                     self.apk_install_finished.emit(True, apk_name, "")
                 else:

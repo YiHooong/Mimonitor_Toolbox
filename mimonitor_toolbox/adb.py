@@ -1,5 +1,6 @@
 """ADB 子进程、设备协议和扫描识别。"""
 
+import logging
 import os
 import socket
 import subprocess
@@ -22,6 +23,13 @@ from .network_scan import (
 )
 
 NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+_startup_warnings = []
+
+
+def drain_startup_warnings():
+    warnings = list(_startup_warnings)
+    _startup_warnings.clear()
+    return warnings
 
 def ensure_persistent_adb_runtime(adb_path):
     if sys.platform != "win32" or not getattr(sys, "frozen", False):
@@ -52,8 +60,11 @@ def ensure_persistent_adb_runtime(adb_path):
         persistent_adb = os.path.join(runtime_dir, "adb.exe")
         if os.path.exists(persistent_adb):
             return persistent_adb
-    except Exception:
-        pass
+    except Exception as exc:
+        _startup_warnings.append(
+            f"ADB 运行时准备失败，已回退到内置路径: "
+            f"{type(exc).__name__}: {exc}"
+        )
     return adb_path
 
 def get_adb_path():
@@ -67,10 +78,43 @@ def get_adb_path():
 
 ADB = get_adb_path()
 ADB_SERVER_PORT = os.environ.get("MIMONITOR_ADB_SERVER_PORT", "5038")
+ADB_DEVICE_PORT = 5555
 ADB_DISCONNECTED_MARKERS = (
     "offline", "unauthorized", "no devices", "not found",
     "cannot", "failed", "error:",
 )
+
+
+def format_adb_serial(ip, port=ADB_DEVICE_PORT):
+    ip = str(ip or "").strip()
+    return f"{ip}:{port}" if ip else ""
+
+
+def build_tvservice_app_process_command(jar, args):
+    encoded_args = "".join(f"\\${{IFS}}{part}" for part in args)
+    return (
+        'service call TvService 3 s16 "sh -c eval\\${IFS}'
+        f'CLASSPATH={jar}'
+        '\\${IFS}/system/bin/app_process'
+        '\\${IFS}/data/data/mitv.service/cache'
+        f'{encoded_args}"'
+    )
+
+
+def parse_jni_batch_output(output):
+    values = {}
+    for line in str(output or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("__") or "=" not in line:
+            continue
+        key, raw = line.split("=", 1)
+        if raw.startswith("ERROR"):
+            continue
+        try:
+            values[key] = int(raw)
+        except (TypeError, ValueError):
+            values[key] = raw
+    return values
 
 
 def is_adb_server_alive(timeout=0.2):
@@ -153,6 +197,13 @@ _adb_processes = set()
 _adb_spawn_blocked = False
 _adb_command_lock = threading.RLock()
 _adb_process_lock = threading.RLock()
+_async_error_handler = None
+_logger = logging.getLogger(__name__)
+
+
+def set_async_error_handler(handler):
+    global _async_error_handler
+    _async_error_handler = handler
 
 
 def adb_command(args):
@@ -258,77 +309,78 @@ def unblock_adb_spawns():
 
 
 class Adb:
-    def __init__(self, ip="192.168.5.205"): self.ip = ip
+    def __init__(self, ip=""): self.ip = ip
+    @property
+    def serial(self):
+        return format_adb_serial(self.ip)
     def transaction(self):
         return _adb_command_lock
     def shell(self, cmd, check=False):
-        out = adb_run(["-s", f"{self.ip}:5555", "shell", cmd], check=check)
+        out = adb_run(["-s", self.serial, "shell", cmd], check=check)
         return out
-    def check_and_heal_jar(self):
+    def _check_and_heal_remote_jar(self, filename, local_jar, check=False):
         with self.transaction():
-            sd_size_lines = self.shell("stat -c %s /sdcard/MtkDirectTool.jar 2>/dev/null || echo 0").strip().splitlines()
+            sdcard_jar = f"/sdcard/{filename}"
+            cache_jar = f"/data/data/mitv.service/cache/{filename}"
+            sd_size_lines = self.shell(
+                f"stat -c %s {sdcard_jar} 2>/dev/null || echo 0",
+                check=check,
+            ).strip().splitlines()
             sd_size_text = sd_size_lines[-1] if sd_size_lines else "0"
             try:
                 sd_size = int(sd_size_text)
-            except Exception:
+            except (TypeError, ValueError):
                 sd_size = 0
-            local_jar = get_mtk_direct_tool_path()
             local_size = 0
             if local_jar:
                 try:
                     local_size = os.path.getsize(local_jar)
-                except Exception:
+                except OSError:
                     local_size = 0
             if sd_size < 1000 or (local_size > 0 and sd_size != local_size):
                 if local_jar:
-                    adb_run(["-s", f"{self.ip}:5555", "push", local_jar, "/sdcard/MtkDirectTool.jar"])
+                    adb_run(
+                        ["-s", self.serial, "push", local_jar, sdcard_jar],
+                        check=check,
+                    )
                 else:
-                    _adb_log("WARNING: MtkDirectTool.jar 本地未找到，无法推送到设备")
-                    return
-            jar = "/data/data/mitv.service/cache/MtkDirectTool.jar"
-            self.shell(f'service call TvService 3 s16 "cp /sdcard/MtkDirectTool.jar {jar}"')
-    def check_and_heal_colorful_led_tool(self, check=False):
-        with self.transaction():
-            sd_size_lines = self.shell("stat -c %s /sdcard/ColorfulLedTool.jar 2>/dev/null || echo 0", check=check).strip().splitlines()
-            sd_size_text = sd_size_lines[-1] if sd_size_lines else "0"
-            try:
-                sd_size = int(sd_size_text)
-            except Exception:
-                sd_size = 0
-            local_jar = get_colorful_led_tool_path()
-            local_size = 0
-            if local_jar:
-                try:
-                    local_size = os.path.getsize(local_jar)
-                except Exception:
-                    local_size = 0
-            if sd_size < 1000 or (local_size > 0 and sd_size != local_size):
-                if local_jar:
-                    adb_run(["-s", f"{self.ip}:5555", "push", local_jar, "/sdcard/ColorfulLedTool.jar"], check=check)
-                else:
-                    _adb_log("WARNING: ColorfulLedTool.jar 本地未找到，无法推送到设备")
+                    _adb_log(f"WARNING: {filename} 本地未找到，无法推送到设备")
                     return False
-            jar = "/data/data/mitv.service/cache/ColorfulLedTool.jar"
-            self.shell(f'service call TvService 3 s16 "cp /sdcard/ColorfulLedTool.jar {jar}"', check=check)
+            self.shell(
+                f'service call TvService 3 s16 "cp {sdcard_jar} {cache_jar}"',
+                check=check,
+            )
             return True
+
+    def check_and_heal_jar(self):
+        self._check_and_heal_remote_jar(
+            "MtkDirectTool.jar",
+            get_mtk_direct_tool_path(),
+        )
+
+    def check_and_heal_colorful_led_tool(self, check=False):
+        return self._check_and_heal_remote_jar(
+            "ColorfulLedTool.jar",
+            get_colorful_led_tool_path(),
+            check=check,
+        )
+
     def connect(self):
-        serial = f"{self.ip}:5555"
-        o = adb_run(["connect", serial])
+        o = adb_run(["connect", self.serial])
         return adb_connect_output_ok(o) and self.device_state(timeout=3) == "device"
     def ensure_connected(self):
         if not self.ip:
             return False, "unknown"
-        serial = f"{self.ip}:5555"
-        state = adb_device_state(serial, timeout=2)
+        state = adb_device_state(self.serial, timeout=2)
         if state == "device":
             return True, state
-        adb_run(["connect", serial], timeout=5)
-        state = adb_device_state(serial, timeout=3)
+        adb_run(["connect", self.serial], timeout=5)
+        state = adb_device_state(self.serial, timeout=3)
         return state == "device", state
     def device_state(self, timeout=3):
         if not self.ip:
             return "unknown"
-        return adb_device_state(f"{self.ip}:5555", timeout=timeout)
+        return adb_device_state(self.serial, timeout=timeout)
     def get(self, k, check=False):
         v = self.shell(f"settings get global {k}", check=check)
         _adb_log(f"settings get {k} => {v}")
@@ -346,25 +398,39 @@ class Adb:
                 return ""
             jar = "/data/data/mitv.service/cache/ColorfulLedTool.jar"
             parts = ["ColorfulLedTool", str(action)] + [str(a) for a in args]
-            cmd_args = "".join([f"\\${{IFS}}{p}" for p in parts])
-            return self.shell(f'service call TvService 3 s16 "sh -c eval\\${{IFS}}CLASSPATH={jar}\\${{IFS}}/system/bin/app_process\\${{IFS}}/data/data/mitv.service/cache{cmd_args}"', check=check)
+            return self.shell(
+                build_tvservice_app_process_command(jar, parts),
+                check=check,
+            )
     def jni_set(self, key, val, upd=3, check=False):
         _adb_log(f"jni_set {key} = {val}")
         jar = "/data/data/mitv.service/cache/MtkDirectTool.jar"
-        return self.shell(f'service call TvService 3 s16 "sh -c eval\\${{IFS}}CLASSPATH={jar}\\${{IFS}}/system/bin/app_process\\${{IFS}}/data/data/mitv.service/cache\\${{IFS}}MtkDirectTool\\${{IFS}}set\\${{IFS}}{key}\\${{IFS}}{val}\\${{IFS}}{upd}"', check=check)
+        command = build_tvservice_app_process_command(
+            jar, ["MtkDirectTool", "set", key, val, upd]
+        )
+        return self.shell(command, check=check)
     def hdr_tone_mapping(self, val, upd=3, check=False):
         _adb_log(f"hdr_tone_mapping = {val}")
         jar = "/data/data/mitv.service/cache/MtkDirectTool.jar"
-        return self.shell(f'service call TvService 3 s16 "sh -c eval\\${{IFS}}CLASSPATH={jar}\\${{IFS}}/system/bin/app_process\\${{IFS}}/data/data/mitv.service/cache\\${{IFS}}MtkDirectTool\\${{IFS}}setHdrToneMapping\\${{IFS}}{val}\\${{IFS}}{upd}"', check=check)
+        command = build_tvservice_app_process_command(
+            jar, ["MtkDirectTool", "setHdrToneMapping", val, upd]
+        )
+        return self.shell(command, check=check)
     def jni_set_color_gains(self, red, green, blue, check=False):
         _adb_log(f"jni_set_color_gains r={red} g={green} b={blue}")
         jar = "/data/data/mitv.service/cache/MtkDirectTool.jar"
-        return self.shell(f'service call TvService 3 s16 "sh -c eval\\${{IFS}}CLASSPATH={jar}\\${{IFS}}/system/bin/app_process\\${{IFS}}/data/data/mitv.service/cache\\${{IFS}}MtkDirectTool\\${{IFS}}setColorGains\\${{IFS}}{red}\\${{IFS}}{green}\\${{IFS}}{blue}"', check=check)
+        command = build_tvservice_app_process_command(
+            jar, ["MtkDirectTool", "setColorGains", red, green, blue]
+        )
+        return self.shell(command, check=check)
     def jni_get(self, key, check=False):
         with self.transaction():
             jar = "/data/data/mitv.service/cache/MtkDirectTool.jar"
             self.shell("logcat -c", check=check)
-            self.shell(f'service call TvService 3 s16 "sh -c eval\\${{IFS}}CLASSPATH={jar}\\${{IFS}}/system/bin/app_process\\${{IFS}}/data/data/mitv.service/cache\\${{IFS}}MtkDirectTool\\${{IFS}}get\\${{IFS}}{key}"', check=check)
+            command = build_tvservice_app_process_command(
+                jar, ["MtkDirectTool", "get", key]
+            )
+            self.shell(command, check=check)
             time.sleep(0.8)
             log = self.shell(f"logcat -d | grep 'GET {key}' | tail -1", check=check)
         i = log.find("= ")
@@ -385,28 +451,19 @@ class Adb:
 
         with self.transaction():
             jar = "/data/data/mitv.service/cache/MtkDirectTool.jar"
-            cmd_args = "".join([f"\\${{IFS}}{p}" for p in ["MtkDirectTool", "batchGet"] + safe_keys])
+            batch_command = build_tvservice_app_process_command(
+                jar, ["MtkDirectTool", "batchGet"] + safe_keys
+            )
             cmd = (
                 f"mkdir -p /sdcard/Download/Mimonitor_Toolbox; "
                 f"rm -f {MTK_BATCH_RESULT_FILE}; "
-                f'service call TvService 3 s16 "sh -c eval\\${{IFS}}CLASSPATH={jar}\\${{IFS}}/system/bin/app_process\\${{IFS}}/data/data/mitv.service/cache{cmd_args}" >/dev/null; '
+                f"{batch_command} >/dev/null; "
                 f"i=0; while [ $i -lt 30 ] && [ ! -f {MTK_BATCH_RESULT_FILE} ]; do sleep 0.1; i=$((i+1)); done; "
                 f"cat {MTK_BATCH_RESULT_FILE} 2>/dev/null"
             )
             out = self.shell(cmd, check=check)
 
-        vals = {}
-        for line in out.splitlines():
-            line = line.strip()
-            if not line or line.startswith("__") or "=" not in line:
-                continue
-            key, raw = line.split("=", 1)
-            if raw.startswith("ERROR"):
-                continue
-            try:
-                vals[key] = int(raw)
-            except Exception:
-                vals[key] = raw
+        vals = parse_jni_batch_output(out)
         if check and not vals:
             raise RuntimeError("未读取到批量 JNI 值")
         _adb_log(f"jni_batch_get {','.join(safe_keys)} => {vals}")
@@ -454,7 +511,7 @@ def scan_adb(cb=None, log=None, cancel_event=None):
         if cancel_event.is_set():
             break
         ip = str(result.ip)
-        serial = f"{ip}:5555"
+        serial = format_adb_serial(ip)
         try:
             if log:
                 log(f"[扫描] {serial} 开放，正在验证...")
@@ -492,4 +549,22 @@ def scan_adb(cb=None, log=None, cancel_event=None):
     return found
 
 
-def async_run(fn): threading.Thread(target=fn, daemon=True).start()
+def async_run(fn):
+    def guarded():
+        try:
+            fn()
+        except Exception as exc:
+            task_name = getattr(fn, "__name__", fn.__class__.__name__)
+            _adb_log(f"BACKGROUND ERROR [{task_name}]: {exc}")
+            handler = _async_error_handler
+            if handler is None:
+                _logger.exception("后台任务 %s 执行失败", task_name)
+                return
+            try:
+                handler(exc)
+            except Exception:
+                _logger.exception("后台任务错误处理器执行失败")
+
+    worker = threading.Thread(target=guarded, daemon=True)
+    worker.start()
+    return worker

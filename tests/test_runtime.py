@@ -103,6 +103,25 @@ class AdbRuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "device offline"):
                 adb_runtime.adb_run(["version"], check=True)
 
+    def test_background_error_is_forwarded_to_thread_safe_log_signal(self):
+        emitted = []
+
+        class Signal:
+            def emit(self, text):
+                emitted.append(text)
+
+        fake_app = type("FakeApp", (), {"log_signal": Signal()})()
+
+        main_window.App._report_background_error(
+            fake_app,
+            RuntimeError("device command failed"),
+        )
+
+        self.assertEqual(
+            emitted,
+            ["后台任务异常: RuntimeError: device command failed"],
+        )
+
     def test_adb_connect_rejects_offline_device_state(self):
         calls = []
 
