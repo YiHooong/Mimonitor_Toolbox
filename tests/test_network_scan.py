@@ -3,6 +3,7 @@ import threading
 import unittest
 from unittest import mock
 
+from mimonitor_toolbox import network_scan
 from mimonitor_toolbox.network_scan import (
     RawAdapterAddress,
     ScanNetwork,
@@ -117,6 +118,20 @@ class ScanNetworkSelectionTests(unittest.TestCase):
 
 
 class TcpProbeTests(unittest.TestCase):
+    def test_single_endpoint_probe_reports_reachability_and_closes_socket(self):
+        probe = getattr(network_scan, "is_tcp_endpoint_open", None)
+        self.assertTrue(callable(probe), "缺少单目标 TCP 可用性探测")
+        connection = mock.MagicMock()
+
+        with mock.patch.object(network_scan.socket, "create_connection", return_value=connection) as connect:
+            self.assertTrue(probe("192.168.5.205", 5555, timeout=0.4))
+
+        connect.assert_called_once_with(("192.168.5.205", 5555), timeout=0.4)
+        connection.close.assert_called_once_with()
+
+        with mock.patch.object(network_scan.socket, "create_connection", side_effect=OSError("offline")):
+            self.assertFalse(probe("192.168.5.205", 5555, timeout=0.4))
+
     def test_binds_source_closes_sockets_and_sorts_open_results(self):
         created = []
         open_ips = {"192.168.5.2", "192.168.5.30"}

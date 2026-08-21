@@ -44,6 +44,7 @@ from .windows import (
     WM_HOTKEY,
     WM_QUERYENDSESSION,
     WM_SETTINGCHANGE,
+    dispatch_power_broadcast,
     get_autostart_path,
     get_executable_path,
     install_autostart,
@@ -67,6 +68,9 @@ class App(PagesMixin, DisplayFeaturesMixin, DeviceFeaturesMixin, FluentWindow):
     page_refresh_finished = pyqtSignal(str, bool)
     adb_action_finished = pyqtSignal(object, bool, str)
     adb_server_event = pyqtSignal(str, str)
+    resume_reconnect_finished = pyqtSignal(int, int, bool, str)
+    connection_recovery_requested = pyqtSignal(int, str, str)
+    reconnect_target_probe_finished = pyqtSignal(int, bool)
 
     def __init__(self):
         super().__init__()
@@ -106,6 +110,9 @@ class App(PagesMixin, DisplayFeaturesMixin, DeviceFeaturesMixin, FluentWindow):
         self.page_refresh_finished.connect(self._finish_page_refresh)
         self.adb_action_finished.connect(self._finish_adb_action)
         self.adb_server_event.connect(self._on_adb_server_event)
+        self.resume_reconnect_finished.connect(self._finish_resume_reconnect_attempt)
+        self.connection_recovery_requested.connect(self._handle_connection_recovery_request)
+        self.reconnect_target_probe_finished.connect(self._finish_reconnect_target_probe)
 
         # Setup layout and components
         self.osd = OsdHud(self)
@@ -310,6 +317,12 @@ class App(PagesMixin, DisplayFeaturesMixin, DeviceFeaturesMixin, FluentWindow):
                         action = payload.get("action") if isinstance(payload, dict) else payload
                         self.trigger_hotkey_action(action)
                 return True, 0
+            if dispatch_power_broadcast(
+                msg.message,
+                msg.wParam,
+                self._handle_windows_resume,
+            ):
+                return True, 1
             if msg.message in (WM_DISPLAYCHANGE, WM_SETTINGCHANGE):
                 self._schedule_hdr_memory_check("windows_event", delay_ms=600)
         return super().nativeEvent(eventType, message)
@@ -365,6 +378,8 @@ class App(PagesMixin, DisplayFeaturesMixin, DeviceFeaturesMixin, FluentWindow):
         if getattr(self, "_cleanup_done", False):
             return
         self._cleanup_done = True
+        self._invalidate_connection_intent()
+        self._cancel_resume_reconnect()
         self._cancel_scan("程序退出")
         session_ending = getattr(self, "_windows_session_ending", False)
         if session_ending:

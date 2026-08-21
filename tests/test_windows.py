@@ -28,6 +28,20 @@ class WindowsRuntimeTests(unittest.TestCase):
             ),
         )
 
+    def test_power_broadcast_uses_automatic_resume_as_the_single_trigger(self):
+        from mimonitor_toolbox import windows
+
+        dispatch = getattr(windows, "dispatch_power_broadcast", None)
+        self.assertIsNotNone(dispatch)
+
+        resume_events = []
+        self.assertTrue(dispatch(0x0218, 0x0012, lambda: resume_events.append("automatic")))
+        self.assertFalse(dispatch(0x0218, 0x0007, lambda: resume_events.append("user-present")))
+        self.assertFalse(dispatch(0x0218, 0x0006, lambda: resume_events.append("critical")))
+        self.assertFalse(dispatch(0x0218, 0x0004, lambda: resume_events.append("suspend")))
+        self.assertFalse(dispatch(0x001A, 0x0012, lambda: resume_events.append("other")))
+        self.assertEqual(resume_events, ["automatic"])
+
 
 if __name__ == "__main__":
     unittest.main()

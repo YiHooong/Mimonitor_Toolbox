@@ -11,6 +11,8 @@ WM_QUERYENDSESSION = 0x0011
 WM_ENDSESSION = 0x0016
 WM_DISPLAYCHANGE = 0x007E
 WM_SETTINGCHANGE = 0x001A
+WM_POWERBROADCAST = 0x0218
+PBT_APMRESUMEAUTOMATIC = 0x0012
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
@@ -22,6 +24,20 @@ if sys.platform == "win32":
         user32 = ctypes.windll.user32
     except Exception as e:
         print(f"Failed to load user32: {e}")
+
+
+def dispatch_power_broadcast(message, power_event, on_resume):
+    """Dispatch Windows resume notifications and report whether they were handled."""
+
+    if (
+        int(message) != WM_POWERBROADCAST
+        or int(power_event) != PBT_APMRESUMEAUTOMATIC
+    ):
+        return False
+    on_resume()
+    return True
+
+
 def query_windows_hdr_enabled(window_handle=None):
     """Return True/False for the active Windows HDR color space, or None when unavailable."""
     if sys.platform != "win32":
@@ -190,4 +206,3 @@ def remove_autostart():
         return True
     except OSError:
         return False
-

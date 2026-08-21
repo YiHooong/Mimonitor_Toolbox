@@ -6,7 +6,7 @@ import sys
 import threading
 import time
 
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QObject, QTimer, Qt
 from PyQt6.QtWidgets import QFileDialog, QSystemTrayIcon, QVBoxLayout, QWidget
 from qfluentwidgets import BodyLabel
 
@@ -37,7 +37,13 @@ from .core import (
     load_settings,
     update_settings,
 )
-from .network_scan import WindowsAdapterError
+from .network_scan import (
+    IF_TYPE_ETHERNET_CSMACD,
+    IF_TYPE_IEEE80211,
+    WindowsAdapterError,
+    enumerate_windows_adapter_addresses,
+    is_tcp_endpoint_open,
+)
 from .widgets import InstallProgressDialog, OverlayResizeFilter
 
 _global_overlay_filter = None
@@ -47,7 +53,7 @@ CREATE_NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010)
 class DeviceFeaturesMixin:
     def initialize_device_features(self):
         """初始化设备连接、扫描和页面加载所需的共享状态。"""
-        self.adb = Adb()
+        self.adb = Adb("")
         self._source_names = {
             23: "HDMI 1", 24: "HDMI 2", 29: "DP", 30: "USBC",
             "23": "HDMI 1", "24": "HDMI 2", "29": "DP", "30": "USBC",
@@ -103,6 +109,250 @@ class DeviceFeaturesMixin:
         self._adb_server_down_notified = False
         self._adb_server_failure_notified = False
         self._adb_server_retry_after = 0.0
+        self._connection_intent_generation = 0
+        self._resume_reconnect_generation = 0
+        self._resume_reconnect_attempt = 0
+        self._resume_reconnect_active = False
+        self._resume_reconnect_checking = False
+        self._resume_waiting_for_network = False
+        self._resume_network_signature = None
+        self._resume_target_probe_checking = False
+        self._resume_target_available = None
+        self._last_windows_resume_at = None
+        timer_parent = self if isinstance(self, QObject) else None
+        self._resume_retry_timer = QTimer(timer_parent)
+        self._resume_retry_timer.setSingleShot(True)
+        self._resume_retry_timer.setInterval(3000)
+        self._resume_retry_timer.timeout.connect(
+            lambda: DeviceFeaturesMixin._run_resume_reconnect_attempt(self)
+        )
+        self._resume_network_timer = QTimer(timer_parent)
+        self._resume_network_timer.setInterval(2000)
+        self._resume_network_timer.timeout.connect(
+            lambda: DeviceFeaturesMixin._check_resume_network_change(self)
+        )
+
+    def _invalidate_connection_intent(self):
+        self._connection_intent_generation = (
+            getattr(self, "_connection_intent_generation", 0) + 1
+        )
+        return self._connection_intent_generation
+
+    def _connection_intent_is_current(self, generation, ip):
+        return (
+            generation == getattr(self, "_connection_intent_generation", 0)
+            and str(getattr(self.adb, "ip", "") or "").strip() == ip
+            and not getattr(self, "_cleanup_done", False)
+            and not getattr(self, "_windows_session_ending", False)
+        )
+
+    def _network_signature(self):
+        try:
+            records = enumerate_windows_adapter_addresses()
+        except WindowsAdapterError:
+            return None
+        except Exception as exc:
+            self.log(f"读取 Windows 网卡状态失败: {exc}")
+            return None
+        signature = [
+            (
+                record.interface_index,
+                record.interface_name,
+                str(record.local_ip),
+                record.prefix_length,
+                record.metric,
+                record.if_type,
+                record.oper_status,
+                record.media_connected,
+            )
+            for record in records
+            if record.hardware_interface
+            and not record.filter_interface
+            and not record.endpoint_interface
+            and record.if_type in (IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211)
+        ]
+        return tuple(sorted(signature))
+
+    def _handle_windows_resume(self):
+        now = time.monotonic()
+        last_resume = getattr(self, "_last_windows_resume_at", None)
+        if last_resume is not None and now - last_resume < 2.0:
+            return
+        self._last_windows_resume_at = now
+        self._start_resume_reconnect("Windows 唤醒")
+
+    def _handle_connection_recovery_request(self, generation, ip, reason):
+        if not self._connection_intent_is_current(generation, ip):
+            return
+        self._start_resume_reconnect(reason)
+
+    def _start_resume_reconnect(self, reason):
+        if getattr(self, "_cleanup_done", False) or getattr(self, "_windows_session_ending", False):
+            return
+        ip = str(getattr(self.adb, "ip", "") or "").strip()
+        if not ip:
+            return
+        if getattr(self, "_resume_reconnect_active", False):
+            self.log(f"{reason}: 重连已在进行中")
+            return
+
+        self._resume_reconnect_generation += 1
+        self._resume_reconnect_attempt = 0
+        self._resume_reconnect_active = True
+        self._resume_reconnect_checking = False
+        self._resume_waiting_for_network = False
+        self._resume_network_signature = None
+        self._resume_target_probe_checking = False
+        self._resume_retry_timer.stop()
+        self._resume_network_timer.stop()
+        self.log(f"{reason}: 开始检查并恢复显示器连接")
+        self._run_resume_reconnect_attempt()
+
+    def _run_resume_reconnect_attempt(self):
+        if not getattr(self, "_resume_reconnect_active", False):
+            return
+        if getattr(self, "_cleanup_done", False) or getattr(self, "_windows_session_ending", False):
+            self._cancel_resume_reconnect()
+            return
+        if getattr(self, "_resume_reconnect_checking", False):
+            return
+        ip = str(getattr(self.adb, "ip", "") or "").strip()
+        if not ip:
+            self._cancel_resume_reconnect()
+            return
+
+        self._resume_reconnect_attempt += 1
+        attempt = self._resume_reconnect_attempt
+        generation = self._resume_reconnect_generation
+        intent_generation = getattr(self, "_connection_intent_generation", 0)
+        self._resume_reconnect_checking = True
+        self.status_signal.emit(f"连接中...（唤醒后重连，第 {attempt}/5 次）")
+
+        def do():
+            ok = False
+            detail = "unknown"
+            try:
+                with self.adb.transaction():
+                    if not self._connection_intent_is_current(intent_generation, ip):
+                        detail = "连接请求已取消"
+                        return
+                    serial = f"{ip}:5555"
+                    state = adb_device_state(serial, timeout=3)
+                    if state != "device":
+                        if not self._connection_intent_is_current(intent_generation, ip):
+                            detail = "连接请求已取消"
+                            return
+                        adb_run(["disconnect", serial], timeout=3)
+                        if not self._connection_intent_is_current(intent_generation, ip):
+                            detail = "连接请求已取消"
+                            return
+                        adb_run(["connect", serial], timeout=5)
+                        state = adb_device_state(serial, timeout=3)
+                    if state == "device":
+                        if not self._connection_intent_is_current(intent_generation, ip):
+                            detail = "连接请求已取消"
+                            return
+                        model = adb_run(
+                            ["-s", serial, "shell", "getprop ro.product.model"],
+                            timeout=3,
+                        ).strip()
+                        if adb_text_has_disconnected_marker(model):
+                            detail = model
+                        else:
+                            ok = True
+                            detail = model or ip
+                    else:
+                        detail = state
+            except Exception as exc:
+                detail = str(exc) or "unknown"
+            finally:
+                self.resume_reconnect_finished.emit(generation, attempt, ok, detail)
+
+        async_run(do)
+
+    def _finish_resume_reconnect_attempt(self, generation, attempt, ok, detail):
+        if generation != getattr(self, "_resume_reconnect_generation", -1):
+            return
+        self._resume_reconnect_checking = False
+        if ok:
+            self._resume_reconnect_active = False
+            self._resume_waiting_for_network = False
+            self._resume_retry_timer.stop()
+            self._resume_network_timer.stop()
+            self.status_signal.emit(f"已连接: {detail}")
+            self.log(f"唤醒后连接已恢复: {detail}")
+            return
+
+        if attempt < 5:
+            self.log(f"唤醒后第 {attempt}/5 次重连失败: {detail}，3 秒后重试")
+            self._resume_retry_timer.start(3000)
+            return
+
+        self._resume_reconnect_active = False
+        self._resume_waiting_for_network = True
+        self._resume_network_signature = self._network_signature()
+        self.status_signal.emit("未连接（重连 5 次失败，等待显示器或网络恢复）")
+        self.log("重连 5 次仍失败，等待显示器 ADB 端口或 Windows 网络恢复")
+        self._resume_network_timer.start(2000)
+
+    def _check_resume_network_change(self):
+        if not getattr(self, "_resume_waiting_for_network", False):
+            return
+        if getattr(self, "_cleanup_done", False) or getattr(self, "_windows_session_ending", False):
+            self._cancel_resume_reconnect()
+            return
+        if not str(getattr(self.adb, "ip", "") or "").strip():
+            self._cancel_resume_reconnect()
+            return
+
+        signature = self._network_signature()
+        if signature is not None:
+            if self._resume_network_signature is None:
+                self._resume_network_signature = signature
+            elif signature != self._resume_network_signature:
+                self.log("检测到 Windows 网络状态变化，重新尝试连接显示器")
+                self._start_resume_reconnect("网络状态变化")
+                return
+
+        if getattr(self, "_resume_target_probe_checking", False):
+            return
+        generation = self._resume_reconnect_generation
+        ip = str(getattr(self.adb, "ip", "") or "").strip()
+        self._resume_target_probe_checking = True
+
+        def do():
+            available = is_tcp_endpoint_open(ip, 5555, timeout=0.5)
+            self.reconnect_target_probe_finished.emit(generation, available)
+
+        async_run(do)
+
+    def _finish_reconnect_target_probe(self, generation, available):
+        if generation != getattr(self, "_resume_reconnect_generation", -1):
+            return
+        self._resume_target_probe_checking = False
+        if not getattr(self, "_resume_waiting_for_network", False):
+            return
+        previous = getattr(self, "_resume_target_available", None)
+        self._resume_target_available = bool(available)
+        if not available or previous is True:
+            return
+        self.log("检测到显示器 ADB 端口恢复，重新尝试连接")
+        self._start_resume_reconnect("显示器已唤醒")
+
+    def _cancel_resume_reconnect(self):
+        self._resume_reconnect_generation = getattr(self, "_resume_reconnect_generation", 0) + 1
+        self._resume_reconnect_active = False
+        self._resume_reconnect_checking = False
+        self._resume_waiting_for_network = False
+        self._resume_network_signature = None
+        self._resume_target_probe_checking = False
+        self._resume_target_available = None
+        retry_timer = getattr(self, "_resume_retry_timer", None)
+        if retry_timer is not None:
+            retry_timer.stop()
+        network_timer = getattr(self, "_resume_network_timer", None)
+        if network_timer is not None:
+            network_timer.stop()
 
     def _monitor_adb_server(self):
         if getattr(self, "_cleanup_done", False) or getattr(self, "_windows_session_ending", False):
@@ -114,6 +364,7 @@ class DeviceFeaturesMixin:
 
         self._adb_server_monitor_checking = True
         ip = self.adb.ip
+        intent_generation = getattr(self, "_connection_intent_generation", 0)
 
         def do():
             if is_adb_server_alive():
@@ -122,11 +373,17 @@ class DeviceFeaturesMixin:
 
             self.adb_server_event.emit("restarting", "")
             try:
-                adb_run(["start-server"], timeout=5, check=True)
-                if not is_adb_server_alive(timeout=0.5):
-                    raise RuntimeError("ADB Server 启动后未监听端口")
-
-                reconnect_result = adb_run(["connect", f"{ip}:5555"], timeout=5)
+                with self.adb.transaction():
+                    if not self._connection_intent_is_current(intent_generation, ip):
+                        self.adb_server_event.emit("cancelled", "")
+                        return
+                    adb_run(["start-server"], timeout=5, check=True)
+                    if not is_adb_server_alive(timeout=0.5):
+                        raise RuntimeError("ADB Server 启动后未监听端口")
+                    if not self._connection_intent_is_current(intent_generation, ip):
+                        self.adb_server_event.emit("cancelled", "")
+                        return
+                    reconnect_result = adb_run(["connect", f"{ip}:5555"], timeout=5)
                 self.adb_server_event.emit("recovered", reconnect_result)
             except Exception as e:
                 self.adb_server_event.emit("failed", str(e))
@@ -137,8 +394,10 @@ class DeviceFeaturesMixin:
         if getattr(self, "_cleanup_done", False):
             return
 
-        if event == "healthy":
+        if event in ("healthy", "cancelled"):
             self._adb_server_monitor_checking = False
+            if event == "cancelled":
+                return
             self._adb_server_down_notified = False
             self._adb_server_failure_notified = False
             self._adb_server_retry_after = 0.0
@@ -199,29 +458,51 @@ class DeviceFeaturesMixin:
             return
         self._adb_keepalive_checking = True
         ip = self.adb.ip
+        intent_generation = getattr(self, "_connection_intent_generation", 0)
 
         def do():
             try:
-                serial = f"{ip}:5555"
-                state = adb_device_state(serial, timeout=3)
-                if state == "device":
-                    return
+                with self.adb.transaction():
+                    if not self._connection_intent_is_current(intent_generation, ip):
+                        return
+                    serial = f"{ip}:5555"
+                    state = adb_device_state(serial, timeout=3)
+                    if state == "device":
+                        return
+                    if not self._connection_intent_is_current(intent_generation, ip):
+                        return
 
-                # 先 disconnect 清除可能存在的 stale transport，
-                # 否则 adb connect 会返回 "already connected" 但实际 TCP 已断
-                self.status_signal.emit(f"连接中...（{adb_device_state_label(state)}，正在重连）")
-                adb_run(["disconnect", serial], timeout=3)
-                adb_run(["connect", serial], timeout=5)
-                state = adb_device_state(serial, timeout=3)
-                if state != "device":
-                    self.status_signal.emit(disconnected_status_text(state))
-                    return
+                    # 先 disconnect 清除可能存在的 stale transport，
+                    # 否则 adb connect 会返回 "already connected" 但实际 TCP 已断
+                    self.status_signal.emit(f"连接中...（{adb_device_state_label(state)}，正在重连）")
+                    adb_run(["disconnect", serial], timeout=3)
+                    if not self._connection_intent_is_current(intent_generation, ip):
+                        return
+                    adb_run(["connect", serial], timeout=5)
+                    state = adb_device_state(serial, timeout=3)
+                    if not self._connection_intent_is_current(intent_generation, ip):
+                        return
+                    if state != "device":
+                        self.status_signal.emit(disconnected_status_text(state))
+                        self.connection_recovery_requested.emit(
+                            intent_generation,
+                            ip,
+                            "显示器休眠或临时断连",
+                        )
+                        return
 
-                m = adb_run(["-s", serial, "shell", "getprop ro.product.model"], timeout=3).strip()
-                if adb_text_has_disconnected_marker(m):
-                    self.status_signal.emit(disconnected_status_text(m))
-                    return
-                self.status_signal.emit(f"已连接: {m or ip}")
+                    m = adb_run(["-s", serial, "shell", "getprop ro.product.model"], timeout=3).strip()
+                    if not self._connection_intent_is_current(intent_generation, ip):
+                        return
+                    if adb_text_has_disconnected_marker(m):
+                        self.status_signal.emit(disconnected_status_text(m))
+                        self.connection_recovery_requested.emit(
+                            intent_generation,
+                            ip,
+                            "显示器休眠或临时断连",
+                        )
+                        return
+                    self.status_signal.emit(f"已连接: {m or ip}")
             finally:
                 self._adb_keepalive_checking = False
 
@@ -236,6 +517,8 @@ class DeviceFeaturesMixin:
     def _run_adb_action(self, label, operation, on_success=None, on_failure=None):
         if getattr(self, "_cleanup_done", False):
             return
+        ip = str(getattr(self.adb, "ip", "") or "").strip()
+        intent_generation = getattr(self, "_connection_intent_generation", 0)
         context = {
             "label": label,
             "on_success": on_success,
@@ -243,14 +526,28 @@ class DeviceFeaturesMixin:
         }
 
         def do():
+            def finish_cancelled():
+                context["cancelled"] = True
+                self.adb_action_finished.emit(context, False, "")
+
             try:
-                if getattr(self, "adb_connected", False) and self.adb.ip:
-                    ok, state = self.adb.ensure_connected()
-                    if not ok:
-                        self.status_signal.emit(disconnected_status_text(state))
-                        raise RuntimeError(f"ADB 连接已断开（{adb_device_state_label(state)}）")
-                operation()
-                self.adb_action_finished.emit(context, True, "")
+                with self.adb.transaction():
+                    if not self._connection_intent_is_current(intent_generation, ip):
+                        finish_cancelled()
+                        return
+                    if getattr(self, "adb_connected", False) and ip:
+                        ok, state = self.adb.ensure_connected()
+                        if not self._connection_intent_is_current(intent_generation, ip):
+                            finish_cancelled()
+                            return
+                        if not ok:
+                            self.status_signal.emit(disconnected_status_text(state))
+                            raise RuntimeError(f"ADB 连接已断开（{adb_device_state_label(state)}）")
+                    operation()
+                    if not self._connection_intent_is_current(intent_generation, ip):
+                        finish_cancelled()
+                        return
+                    self.adb_action_finished.emit(context, True, "")
             except Exception as e:
                 self.adb_action_finished.emit(context, False, str(e))
 
@@ -262,7 +559,7 @@ class DeviceFeaturesMixin:
         callback = context.get("on_success") if ok else context.get("on_failure")
         if callable(callback):
             callback()
-        if ok:
+        if ok or context.get("cancelled"):
             return
         label = context.get("label", "ADB 操作")
         message = f"{label}失败：{detail or '未知错误'}"
@@ -278,13 +575,15 @@ class DeviceFeaturesMixin:
             )
 
     def disconnect_adb(self):
+        self._invalidate_connection_intent()
+        self._cancel_resume_reconnect()
         if self.adb.ip:
             self.log(f"正在断开与 {self.adb.ip} 的连接...")
             ip = self.adb.ip
+            self.adb.ip = ""
 
             def do():
                 adb_run(["disconnect", f"{ip}:5555"])
-                self.adb.ip = ""
                 self.status_signal.emit("未连接")
                 self.log("连接已断开")
             async_run(do)
@@ -300,6 +599,7 @@ class DeviceFeaturesMixin:
             return
 
         self.ip_entry.setText(saved_ip)
+        intent_generation = self._invalidate_connection_intent()
         self.adb.ip = saved_ip
         self._connection_in_progress = True
         self.status_signal.emit("连接中...")
@@ -307,21 +607,30 @@ class DeviceFeaturesMixin:
 
         def do():
             try:
-                ok = self.adb.connect()
-                if ok:
-                    self.status_signal.emit("已连接")
-                    self.log(f"启动自动连接成功: {self.adb.ip}")
-                    self.adb.check_and_heal_jar()
-                    m = self.adb.get_model().strip()
-                    if adb_text_has_disconnected_marker(m):
-                        self.status_signal.emit(disconnected_status_text(m))
-                        self.log(f"启动自动连接后设备状态异常: {m}")
+                with self.adb.transaction():
+                    if not self._connection_intent_is_current(intent_generation, saved_ip):
                         return
-                    self.status_signal.emit(f"已连接: {m or self.adb.ip}")
-                else:
-                    self.log(f"启动自动连接失败: {saved_ip}，开始扫描内网")
-                    self.status_signal.emit("未连接")
-                    self.auto_scan_signal.emit()
+                    ok = self.adb.connect()
+                    if not self._connection_intent_is_current(intent_generation, saved_ip):
+                        return
+                    if ok:
+                        self.status_signal.emit("已连接")
+                        self.log(f"启动自动连接成功: {saved_ip}")
+                        self.adb.check_and_heal_jar()
+                        if not self._connection_intent_is_current(intent_generation, saved_ip):
+                            return
+                        m = self.adb.get_model().strip()
+                        if not self._connection_intent_is_current(intent_generation, saved_ip):
+                            return
+                        if adb_text_has_disconnected_marker(m):
+                            self.status_signal.emit(disconnected_status_text(m))
+                            self.log(f"启动自动连接后设备状态异常: {m}")
+                            return
+                        self.status_signal.emit(f"已连接: {m or saved_ip}")
+                    else:
+                        self.log(f"启动自动连接失败: {saved_ip}，开始扫描内网")
+                        self.status_signal.emit("未连接")
+                        self.auto_scan_signal.emit()
             finally:
                 self._connection_in_progress = False
 
@@ -334,28 +643,39 @@ class DeviceFeaturesMixin:
         ip = self.ip_entry.text().strip()
         if not ip:
             return
+        intent_generation = self._invalidate_connection_intent()
+        self._cancel_resume_reconnect()
         self._cancel_scan("手动连接")
         self.adb.ip = ip
         self._connection_in_progress = True
         self.status_signal.emit("连接中...")
         def do():
             try:
-                ok = self.adb.connect()
-                if ok:
-                    self.status_signal.emit("已连接")
-                    self.log(f"连接成功: {self.adb.ip}")
-                    update_settings({"saved_ip": ip})
-                    self.adb.check_and_heal_jar()
-                    m = self.adb.get_model().strip()
-                    if adb_text_has_disconnected_marker(m):
-                        self.status_signal.emit(disconnected_status_text(m))
-                        self.log(f"连接后设备状态异常: {m}")
+                with self.adb.transaction():
+                    if not self._connection_intent_is_current(intent_generation, ip):
                         return
-                    self.status_signal.emit(f"已连接: {m or self.adb.ip}")
-                else:
-                    self.status_signal.emit("连接失败")
-                    self.message_signal.emit("error", "错误", "连接显示器失败，请检查IP和网络连接！")
-                    self.log("连接失败")
+                    ok = self.adb.connect()
+                    if not self._connection_intent_is_current(intent_generation, ip):
+                        return
+                    if ok:
+                        self.status_signal.emit("已连接")
+                        self.log(f"连接成功: {ip}")
+                        update_settings({"saved_ip": ip})
+                        self.adb.check_and_heal_jar()
+                        if not self._connection_intent_is_current(intent_generation, ip):
+                            return
+                        m = self.adb.get_model().strip()
+                        if not self._connection_intent_is_current(intent_generation, ip):
+                            return
+                        if adb_text_has_disconnected_marker(m):
+                            self.status_signal.emit(disconnected_status_text(m))
+                            self.log(f"连接后设备状态异常: {m}")
+                            return
+                        self.status_signal.emit(f"已连接: {m or ip}")
+                    else:
+                        self.status_signal.emit("连接失败")
+                        self.message_signal.emit("error", "错误", "连接显示器失败，请检查IP和网络连接！")
+                        self.log("连接失败")
             finally:
                 self._connection_in_progress = False
         async_run(do)

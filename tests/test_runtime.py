@@ -1,3 +1,5 @@
+import ctypes
+import ctypes.wintypes
 import json
 import ipaddress
 import os
@@ -9,7 +11,7 @@ from contextlib import nullcontext
 from unittest import mock
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QSystemTrayIcon
+from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -156,11 +158,20 @@ class AdbRuntimeTests(unittest.TestCase):
         class FakeApp:
             _cleanup_done = False
             _windows_session_ending = False
+            _connection_intent_generation = 0
+            _connection_intent_is_current = (
+                device_features.DeviceFeaturesMixin._connection_intent_is_current
+            )
             adb_connected = True
-            adb = type("FakeAdb", (), {"ip": "192.168.5.205"})()
+            adb = type(
+                "FakeAdb",
+                (),
+                {"ip": "192.168.5.205", "transaction": staticmethod(nullcontext)},
+            )()
             _adb_keepalive_checking = False
             _adb_busy_until = 0.0
             status_signal = FakeSignal()
+            connection_recovery_requested = mock.Mock()
 
         def fake_adb_run(args, timeout=10, check=False):
             commands.append(args)
@@ -203,8 +214,16 @@ class AdbRuntimeTests(unittest.TestCase):
         class FakeApp:
             _cleanup_done = False
             _windows_session_ending = False
+            _connection_intent_generation = 0
+            _connection_intent_is_current = (
+                device_features.DeviceFeaturesMixin._connection_intent_is_current
+            )
             adb_connected = True
-            adb = type("FakeAdb", (), {"ip": "192.168.5.205"})()
+            adb = type(
+                "FakeAdb",
+                (),
+                {"ip": "192.168.5.205", "transaction": staticmethod(nullcontext)},
+            )()
             _adb_server_monitor_checking = False
             _adb_server_retry_after = 0.0
             adb_server_event = FakeSignal()
@@ -271,12 +290,20 @@ class AdbRuntimeTests(unittest.TestCase):
         class FakeAdb:
             ip = "192.168.5.205"
 
+            def transaction(self):
+                return nullcontext()
+
             def ensure_connected(self):
                 events.append(("ensure",))
                 return True, "device"
 
         class FakeApp:
             _cleanup_done = False
+            _windows_session_ending = False
+            _connection_intent_generation = 0
+            _connection_intent_is_current = (
+                device_features.DeviceFeaturesMixin._connection_intent_is_current
+            )
             adb_connected = True
             adb = FakeAdb()
             adb_action_finished = FakeSignal()
@@ -302,11 +329,19 @@ class AdbRuntimeTests(unittest.TestCase):
         class FakeAdb:
             ip = "192.168.5.205"
 
+            def transaction(self):
+                return nullcontext()
+
             def ensure_connected(self):
                 return False, "offline"
 
         class FakeApp:
             _cleanup_done = False
+            _windows_session_ending = False
+            _connection_intent_generation = 0
+            _connection_intent_is_current = (
+                device_features.DeviceFeaturesMixin._connection_intent_is_current
+            )
             adb_connected = True
             adb = FakeAdb()
             adb_action_finished = FakeSignal()
@@ -556,6 +591,27 @@ class ScanLifecycleTests(unittest.TestCase):
 
 
 class StateMachineTests(unittest.TestCase):
+    def test_native_power_resume_starts_reconnect_cycle(self):
+        qapp = QApplication.instance() or QApplication([])
+        window = main_window.App.__new__(main_window.App)
+        calls = []
+        window._handle_windows_resume = lambda: calls.append("resume")
+        message = ctypes.wintypes.MSG()
+        message.message = 0x0218
+        message.wParam = 0x0012
+
+        with mock.patch.object(main_window.sys, "platform", "win32"), \
+                mock.patch.object(main_window, "user32", object()), \
+                mock.patch.object(main_window.FluentWindow, "nativeEvent", return_value=(False, 0)):
+            result = window.nativeEvent(
+                b"windows_generic_MSG",
+                ctypes.addressof(message),
+            )
+
+        self.assertEqual(result, (True, 1))
+        self.assertEqual(calls, ["resume"])
+        self.assertIsNotNone(qapp)
+
     def test_non_game_feature_cancel_restores_memory_without_adb_action(self):
         dialogs = []
         highlights = []

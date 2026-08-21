@@ -40,6 +40,22 @@ class WindowsAdapterError(RuntimeError):
     """Windows IP Helper 网卡枚举失败。"""
 
 
+def is_tcp_endpoint_open(host: str, port: int = 5555, timeout: float = 0.5) -> bool:
+    """轻量检测单个 TCP 端点是否可达。"""
+    connection = None
+    try:
+        connection = socket.create_connection((host, port), timeout=timeout)
+        return True
+    except OSError:
+        return False
+    finally:
+        if connection is not None:
+            try:
+                connection.close()
+            except OSError:
+                pass
+
+
 class _GUID(ctypes.Structure):
     _fields_ = [
         ("Data1", _ULONG),
