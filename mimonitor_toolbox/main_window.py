@@ -483,7 +483,8 @@ class App(PagesMixin, DisplayFeaturesMixin, DeviceFeaturesMixin, FluentWindow):
 
     def _on_log(self, text):
         self.log_widget.append(text)
-        self.log_widget.ensureCursorVisible()
+        scroll_bar = self.log_widget.verticalScrollBar()
+        scroll_bar.setValue(scroll_bar.maximum())
         if adb_runtime._log_file and adb_runtime._log_to_file_enabled:
             try:
                 adb_runtime._log_file.write(text + "\n")
