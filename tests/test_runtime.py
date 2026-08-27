@@ -611,6 +611,38 @@ class ScanLifecycleTests(unittest.TestCase):
         self.assertTrue(fake.adb_connected)
         self.assertEqual(fake.status_label.text, "扫描完成: 1台")
 
+    def test_losing_device_connection_stops_live_source_polling(self):
+        stops = []
+
+        class FakeLabel:
+            def setText(self, text):
+                self.text = text
+
+            def setStyleSheet(self, style):
+                self.style = style
+
+        class FakeApp:
+            adb_connected = True
+            status_label = FakeLabel()
+            _page_loaded = {"sourcePage"}
+            _hdr_last_state = True
+            _hdr_state_source = "Windows"
+
+            def _stop_source_polling(self):
+                stops.append(True)
+
+            def _update_hdr_memory_status_label(self, _source):
+                pass
+
+            def setWindowTitle(self, title):
+                self.title = title
+
+        fake = FakeApp()
+        app.App._on_status(fake, "未连接（设备离线）")
+
+        self.assertFalse(fake.adb_connected)
+        self.assertEqual(stops, [True])
+
     def test_duplicate_scan_request_is_ignored(self):
         logs = []
 
@@ -642,6 +674,39 @@ class ScanLifecycleTests(unittest.TestCase):
 
 
 class StateMachineTests(unittest.TestCase):
+    def test_cleanup_stops_live_source_poll_timer(self):
+        class FakeTimer:
+            stopped = False
+
+            def stop(self):
+                self.stopped = True
+
+        class FakeApp:
+            _cleanup_done = False
+            _windows_session_ending = True
+            _source_poll_timer = FakeTimer()
+            adb = SimpleNamespace(ip="")
+
+            def _invalidate_connection_intent(self):
+                pass
+
+            def _cancel_resume_reconnect(self):
+                pass
+
+            def _cancel_scan(self, _reason):
+                pass
+
+            def unregister_all_hotkeys(self):
+                pass
+
+        fake = FakeApp()
+        with mock.patch.object(main_window, "set_async_error_handler"), \
+                mock.patch.object(main_window, "block_adb_spawns"), \
+                mock.patch.object(main_window, "cleanup_adb_processes"):
+            main_window.App.cleanup_before_exit(fake)
+
+        self.assertTrue(fake._source_poll_timer.stopped)
+
     def test_native_power_resume_starts_reconnect_cycle(self):
         qapp = QApplication.instance() or QApplication([])
         window = main_window.App.__new__(main_window.App)

@@ -53,6 +53,67 @@ RESUME_DISCOVERY_INTERVAL_SECONDS = 30.0
 
 
 class DeviceFeaturesMixin:
+    def _source_page_is_active(self):
+        stacked_widget = getattr(self, "stackedWidget", None)
+        page = stacked_widget.currentWidget() if stacked_widget is not None else None
+        return bool(page and page.objectName() == "sourcePage")
+
+    def _start_source_polling(self):
+        if not getattr(self, "adb_connected", False) or not self._source_page_is_active():
+            return
+        self._source_poll_armed = True
+        self._source_poll_timer.start(2000)
+
+    def _stop_source_polling(self):
+        self._source_poll_armed = False
+        timer = getattr(self, "_source_poll_timer", None)
+        if timer is not None:
+            timer.stop()
+
+    def _poll_source_state(self):
+        should_stop = (
+            getattr(self, "_cleanup_done", False)
+            or getattr(self, "_windows_session_ending", False)
+            or not getattr(self, "adb_connected", False)
+            or not getattr(self, "_source_poll_armed", False)
+            or not self._source_page_is_active()
+        )
+        if should_stop:
+            self._stop_source_polling()
+            return
+        if getattr(self, "_source_poll_checking", False) or self._adb_channel_busy():
+            return
+        self._source_poll_checking = True
+
+        def do():
+            try:
+                with self.adb.transaction():
+                    raw_source = self.adb.get(
+                        "mitv.tvplayer.hdmi.last.source",
+                        check=True,
+                    )
+                source_text = str(raw_source or "").strip()
+                if not source_text or source_text.lower() in ("null", "n/a"):
+                    return
+                try:
+                    source = int(source_text)
+                except ValueError:
+                    source = source_text
+                if (
+                    getattr(self, "_source_poll_armed", False)
+                    and getattr(self, "adb_connected", False)
+                ):
+                    self.values_signal.emit(
+                        {"mitv.tvplayer.hdmi.last.source": source}
+                    )
+            except Exception:
+                # 尽力同步即可；临时断连由现有保活/重连机制负责。
+                return
+            finally:
+                self._source_poll_checking = False
+
+        async_run(do)
+
     def initialize_device_features(self):
         """初始化设备连接、扫描和页面加载所需的共享状态。"""
         self.adb = Adb("")
@@ -126,6 +187,13 @@ class DeviceFeaturesMixin:
         self._resume_manual_selection_required = False
         self._last_windows_resume_at = None
         timer_parent = self if isinstance(self, QObject) else None
+        self._source_poll_armed = False
+        self._source_poll_checking = False
+        self._source_poll_timer = QTimer(timer_parent)
+        self._source_poll_timer.setInterval(2000)
+        self._source_poll_timer.timeout.connect(
+            lambda: DeviceFeaturesMixin._poll_source_state(self)
+        )
         self._resume_retry_timer = QTimer(timer_parent)
         self._resume_retry_timer.setSingleShot(True)
         self._resume_retry_timer.setInterval(3000)
@@ -694,6 +762,7 @@ class DeviceFeaturesMixin:
     def disconnect_adb(self):
         self._invalidate_connection_intent()
         self._cancel_resume_reconnect()
+        self._stop_source_polling()
         if self.adb.ip:
             self.log(f"正在断开与 {self.adb.ip} 的连接...")
             ip = self.adb.ip
@@ -1261,6 +1330,8 @@ class DeviceFeaturesMixin:
         if not page:
             return
         name = page.objectName()
+        if name != "sourcePage":
+            self._stop_source_polling()
         # 未连接时阻止进入需要连接的页面
         if name in self._PAGES_NEED_CONNECTION and not getattr(self, "adb_connected", False):
             self.message_signal.emit("warn", "未连接显示器", "请先在主页连接显示器！")

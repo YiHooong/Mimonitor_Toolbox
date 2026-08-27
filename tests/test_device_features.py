@@ -8,7 +8,7 @@ from unittest import mock
 
 from PyQt6.QtCore import QObject
 
-from mimonitor_toolbox import device_features
+from mimonitor_toolbox import device_features, display_features
 
 
 class FakeTimer:
@@ -124,6 +124,270 @@ class DeviceFeatureContractTests(unittest.TestCase):
         )
 
         self.assertEqual(host.dev_combo.current_index, -1)
+
+
+class SourcePollingTests(unittest.TestCase):
+    def test_device_features_initialize_source_polling_inactive(self):
+        class Host(device_features.DeviceFeaturesMixin, QObject):
+            pass
+
+        host = Host()
+        host.initialize_device_features()
+
+        timer = getattr(host, "_source_poll_timer", None)
+        self.assertIsNotNone(timer)
+        self.assertEqual(timer.interval(), 2000)
+        self.assertFalse(timer.isActive())
+
+    def test_successful_software_source_switch_starts_live_polling(self):
+        polling_starts = []
+
+        class Host:
+            current_vals = {"mitv.tvplayer.hdmi.last.source": 23}
+            _source_names = {23: "HDMI 1", 24: "HDMI 2"}
+            source_label = SimpleNamespace(setText=lambda _text: None)
+
+            def check_connection(self):
+                return True
+
+            def _mark_adb_busy(self, _seconds):
+                pass
+
+            def _take_control_previous(self, key):
+                return self.current_vals.get(key)
+
+            def _run_adb_action(self, _label, _operation, on_success, _on_failure):
+                on_success()
+
+            def _optimistic_highlight(self, _key, _value):
+                pass
+
+            def _start_source_polling(self):
+                polling_starts.append(True)
+
+            def log(self, _message):
+                pass
+
+        display_features.DisplayFeaturesMixin._set(
+            Host(),
+            "mitv.tvplayer.hdmi.last.source",
+            24,
+            "HDMI 2",
+        )
+
+        self.assertEqual(polling_starts, [True])
+
+    def test_live_source_polling_starts_only_while_source_page_is_active(self):
+        page = SimpleNamespace(objectName=lambda: "sourcePage")
+        class Host(device_features.DeviceFeaturesMixin):
+            adb_connected = True
+            stackedWidget = SimpleNamespace(currentWidget=lambda: page)
+            _source_poll_timer = FakeTimer()
+            _source_poll_armed = False
+
+        host = Host()
+
+        starter = getattr(
+            device_features.DeviceFeaturesMixin,
+            "_start_source_polling",
+            None,
+        )
+        self.assertIsNotNone(starter)
+        starter(host)
+
+        self.assertTrue(host._source_poll_armed)
+        self.assertEqual(host._source_poll_timer.start_calls, [2000])
+
+    def test_leaving_source_page_stops_and_disarms_live_polling(self):
+        page = SimpleNamespace(objectName=lambda: "homePage")
+
+        class Host(device_features.DeviceFeaturesMixin):
+            adb_connected = True
+            stackedWidget = SimpleNamespace(widget=lambda _index: page)
+            _PAGES_NEED_CONNECTION = set()
+            _page_data_keys = {}
+            _page_loaded = set()
+            _page_loading = set()
+            _source_poll_timer = FakeTimer()
+            _source_poll_armed = True
+
+        host = Host()
+        host._on_page_changed(0)
+
+        self.assertFalse(host._source_poll_armed)
+        self.assertEqual(host._source_poll_timer.stop_calls, 1)
+
+    def test_live_source_poll_reads_and_emits_current_source(self):
+        reads = []
+        page = SimpleNamespace(objectName=lambda: "sourcePage")
+
+        class FakeAdb:
+            def transaction(self):
+                return nullcontext()
+
+            def get(self, key, check=False):
+                reads.append((key, check))
+                return "29"
+
+        class Host(device_features.DeviceFeaturesMixin):
+            adb_connected = True
+            _cleanup_done = False
+            _windows_session_ending = False
+            _source_poll_armed = True
+            _source_poll_checking = False
+            stackedWidget = SimpleNamespace(currentWidget=lambda: page)
+            adb = FakeAdb()
+            values_signal = FakeSignal()
+
+            def _adb_channel_busy(self):
+                return False
+
+        host = Host()
+        poll = getattr(
+            device_features.DeviceFeaturesMixin,
+            "_poll_source_state",
+            None,
+        )
+        self.assertIsNotNone(poll)
+        with mock.patch.object(device_features, "async_run", side_effect=lambda fn: fn()):
+            poll(host)
+
+        self.assertEqual(
+            reads,
+            [("mitv.tvplayer.hdmi.last.source", True)],
+        )
+        self.assertEqual(
+            host.values_signal.events,
+            [({"mitv.tvplayer.hdmi.last.source": 29},)],
+        )
+        self.assertFalse(host._source_poll_checking)
+
+    def test_live_source_poll_skips_while_adb_channel_is_busy(self):
+        reads = []
+        page = SimpleNamespace(objectName=lambda: "sourcePage")
+
+        class FakeAdb:
+            def transaction(self):
+                return nullcontext()
+
+            def get(self, key, check=False):
+                reads.append((key, check))
+                return "24"
+
+        class Host(device_features.DeviceFeaturesMixin):
+            adb_connected = True
+            _cleanup_done = False
+            _windows_session_ending = False
+            _source_poll_armed = True
+            _source_poll_checking = False
+            stackedWidget = SimpleNamespace(currentWidget=lambda: page)
+            adb = FakeAdb()
+            values_signal = FakeSignal()
+
+            def _adb_channel_busy(self):
+                return True
+
+        host = Host()
+        with mock.patch.object(device_features, "async_run", side_effect=lambda fn: fn()):
+            host._poll_source_state()
+
+        self.assertEqual(reads, [])
+        self.assertEqual(host.values_signal.events, [])
+        self.assertFalse(host._source_poll_checking)
+
+    def test_live_source_poll_does_not_overlap_an_inflight_read(self):
+        reads = []
+        page = SimpleNamespace(objectName=lambda: "sourcePage")
+
+        class FakeAdb:
+            def transaction(self):
+                return nullcontext()
+
+            def get(self, key, check=False):
+                reads.append((key, check))
+                return "24"
+
+        class Host(device_features.DeviceFeaturesMixin):
+            adb_connected = True
+            _cleanup_done = False
+            _windows_session_ending = False
+            _source_poll_armed = True
+            _source_poll_checking = True
+            stackedWidget = SimpleNamespace(currentWidget=lambda: page)
+            adb = FakeAdb()
+            values_signal = FakeSignal()
+
+            def _adb_channel_busy(self):
+                return False
+
+        host = Host()
+        with mock.patch.object(device_features, "async_run", side_effect=lambda fn: fn()):
+            host._poll_source_state()
+
+        self.assertEqual(reads, [])
+        self.assertEqual(host.values_signal.events, [])
+        self.assertTrue(host._source_poll_checking)
+
+    def test_manual_disconnect_stops_live_source_polling_immediately(self):
+        stops = []
+
+        class Host(device_features.DeviceFeaturesMixin):
+            adb = SimpleNamespace(ip="192.168.5.205")
+            status_signal = FakeSignal()
+
+            def _invalidate_connection_intent(self):
+                pass
+
+            def _cancel_resume_reconnect(self):
+                pass
+
+            def _stop_source_polling(self):
+                stops.append(True)
+
+            def log(self, _message):
+                pass
+
+        host = Host()
+        with mock.patch.object(device_features, "async_run"):
+            host.disconnect_adb()
+
+        self.assertEqual(stops, [True])
+        self.assertEqual(host.adb.ip, "")
+
+    def test_transient_live_source_read_failure_is_ignored_until_next_tick(self):
+        page = SimpleNamespace(objectName=lambda: "sourcePage")
+
+        class FakeAdb:
+            def transaction(self):
+                return nullcontext()
+
+            def get(self, _key, check=False):
+                raise RuntimeError("device offline")
+
+        class Host(device_features.DeviceFeaturesMixin):
+            adb_connected = True
+            _cleanup_done = False
+            _windows_session_ending = False
+            _source_poll_armed = True
+            _source_poll_checking = False
+            stackedWidget = SimpleNamespace(currentWidget=lambda: page)
+            adb = FakeAdb()
+            values_signal = FakeSignal()
+
+            def _adb_channel_busy(self):
+                return False
+
+        host = Host()
+        errors = []
+        with mock.patch.object(device_features, "async_run", side_effect=lambda fn: fn()):
+            try:
+                host._poll_source_state()
+            except RuntimeError as exc:
+                errors.append(str(exc))
+
+        self.assertEqual(errors, [])
+        self.assertEqual(host.values_signal.events, [])
+        self.assertFalse(host._source_poll_checking)
 
 
 class TerminalLaunchTests(unittest.TestCase):

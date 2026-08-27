@@ -1030,6 +1030,7 @@ class DisplayFeaturesMixin:
             if k == "mitv.tvplayer.hdmi.last.source":
                 self.source_var_text = self._source_names.get(v, f"未知 ({v})")
                 self.source_label.setText(self.source_var_text)
+                self._start_source_polling()
 
         def failure():
             if previous is not None:

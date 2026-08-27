@@ -397,6 +397,7 @@ class App(PagesMixin, DisplayFeaturesMixin, DeviceFeaturesMixin, FluentWindow):
         except Exception:
             pass
         try:
+            DeviceFeaturesMixin._stop_source_polling(self)
             if hasattr(self, "adb_keepalive_timer"):
                 self.adb_keepalive_timer.stop()
             if hasattr(self, "adb_server_monitor_timer"):
@@ -644,6 +645,7 @@ class App(PagesMixin, DisplayFeaturesMixin, DeviceFeaturesMixin, FluentWindow):
             self.adb_connected = is_connected_status_text(text)
             # 连接状态变化时清除页面缓存
             if was_connected and not self.adb_connected:
+                self._stop_source_polling()
                 self._page_loaded.clear()
                 self._hdr_last_state = None
                 self._hdr_state_source = None
