@@ -49,6 +49,7 @@ from .widgets import InstallProgressDialog, OverlayResizeFilter
 
 _global_overlay_filter = None
 CREATE_NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010)
+RESUME_DISCOVERY_INTERVAL_SECONDS = 30.0
 
 
 class DeviceFeaturesMixin:
@@ -119,6 +120,10 @@ class DeviceFeaturesMixin:
         self._resume_network_signature = None
         self._resume_target_probe_checking = False
         self._resume_target_available = None
+        self._resume_discovery_checking = False
+        self._resume_discovery_cancel_event = None
+        self._resume_next_discovery_at = 0.0
+        self._resume_manual_selection_required = False
         self._last_windows_resume_at = None
         timer_parent = self if isinstance(self, QObject) else None
         self._resume_retry_timer = QTimer(timer_parent)
@@ -197,6 +202,10 @@ class DeviceFeaturesMixin:
             self.log(f"{reason}: 重连已在进行中")
             return
 
+        discovery_cancel = getattr(self, "_resume_discovery_cancel_event", None)
+        if discovery_cancel is not None:
+            discovery_cancel.set()
+
         self._resume_reconnect_generation += 1
         self._resume_reconnect_attempt = 0
         self._resume_reconnect_active = True
@@ -204,6 +213,8 @@ class DeviceFeaturesMixin:
         self._resume_waiting_for_network = False
         self._resume_network_signature = None
         self._resume_target_probe_checking = False
+        self._resume_discovery_checking = False
+        self._resume_discovery_cancel_event = None
         self._resume_retry_timer.stop()
         self._resume_network_timer.stop()
         self.log(f"{reason}: 开始检查并恢复显示器连接")
@@ -278,6 +289,7 @@ class DeviceFeaturesMixin:
         if ok:
             self._resume_reconnect_active = False
             self._resume_waiting_for_network = False
+            self._resume_manual_selection_required = False
             self._resume_retry_timer.stop()
             self._resume_network_timer.stop()
             self.status_signal.emit(f"已连接: {detail}")
@@ -295,6 +307,92 @@ class DeviceFeaturesMixin:
         self.status_signal.emit("未连接（重连 5 次失败，等待显示器或网络恢复）")
         self.log("重连 5 次仍失败，等待显示器 ADB 端口或 Windows 网络恢复")
         self._resume_network_timer.start(2000)
+        self._start_resume_discovery()
+
+    def _start_resume_discovery(self):
+        if not getattr(self, "_resume_waiting_for_network", False):
+            return
+        if getattr(self, "_resume_discovery_checking", False):
+            return
+        if getattr(self, "_resume_manual_selection_required", False):
+            return
+        if getattr(self, "_scan_running", False):
+            self._resume_next_discovery_at = (
+                time.monotonic() + RESUME_DISCOVERY_INTERVAL_SECONDS
+            )
+            return
+        if getattr(self, "_connection_in_progress", False):
+            return
+        if getattr(self, "_cleanup_done", False) or getattr(self, "_windows_session_ending", False):
+            return
+        next_discovery_at = getattr(self, "_resume_next_discovery_at", 0.0)
+        if next_discovery_at > 0 and time.monotonic() < next_discovery_at:
+            return
+
+        generation = self._resume_reconnect_generation
+        cancel_event = threading.Event()
+        self._resume_discovery_checking = True
+        self._resume_discovery_cancel_event = cancel_event
+        self.log("旧 IP 重连失败，扫描物理局域网查找显示器的新地址")
+
+        def do():
+            devices = []
+            detail = ""
+            try:
+                devices = scan_adb(log=self.log, cancel_event=cancel_event)
+            except Exception as exc:
+                detail = str(exc) or "扫描异常"
+            finally:
+                self.resume_discovery_finished.emit(generation, devices, detail)
+
+        async_run(do)
+
+    def _finish_resume_discovery(self, generation, devices, detail):
+        if generation != getattr(self, "_resume_reconnect_generation", -1):
+            return
+        self._resume_discovery_checking = False
+        self._resume_discovery_cancel_event = None
+        if not getattr(self, "_resume_waiting_for_network", False):
+            return
+        if getattr(self, "_resume_manual_selection_required", False):
+            return
+        self._resume_next_discovery_at = (
+            time.monotonic() + RESUME_DISCOVERY_INTERVAL_SECONDS
+        )
+        if detail:
+            self.log(f"显示器地址扫描失败: {detail}")
+            return
+
+        mitv_devices = [
+            (str(ip), model)
+            for ip, model in devices
+            if is_mitv_model(model)
+        ]
+        if len(mitv_devices) > 1:
+            self._resume_manual_selection_required = True
+            self._resume_next_discovery_at = 0.0
+            self.devices_signal.emit(
+                getattr(self, "_scan_id", 0),
+                mitv_devices,
+            )
+            message = f"局域网发现 {len(mitv_devices)} 台显示器，请手动选择"
+            self.status_signal.emit(message)
+            self.log(message)
+            return
+        if not mitv_devices:
+            return
+
+        new_ip, model = mitv_devices[0]
+        old_ip = str(getattr(self.adb, "ip", "") or "").strip()
+        if new_ip != old_ip:
+            self._invalidate_connection_intent()
+            self.adb.ip = new_ip
+            self.ip_entry.setText(new_ip)
+            update_settings({"saved_ip": new_ip})
+            self.log(f"发现显示器地址已变化: {old_ip} -> {new_ip}")
+        else:
+            self.log(f"局域网扫描重新发现显示器: {model} ({new_ip})")
+        self._start_resume_reconnect("局域网发现显示器")
 
     def _check_resume_network_change(self):
         if not getattr(self, "_resume_waiting_for_network", False):
@@ -305,6 +403,8 @@ class DeviceFeaturesMixin:
         if not str(getattr(self.adb, "ip", "") or "").strip():
             self._cancel_resume_reconnect()
             return
+        if getattr(self, "_scan_running", False):
+            return
 
         signature = self._network_signature()
         if signature is not None:
@@ -312,10 +412,17 @@ class DeviceFeaturesMixin:
                 self._resume_network_signature = signature
             elif signature != self._resume_network_signature:
                 self.log("检测到 Windows 网络状态变化，重新尝试连接显示器")
+                self._resume_next_discovery_at = 0.0
                 self._start_resume_reconnect("网络状态变化")
                 return
 
+        if getattr(self, "_resume_discovery_checking", False):
+            return
         if getattr(self, "_resume_target_probe_checking", False):
+            return
+        next_discovery_at = getattr(self, "_resume_next_discovery_at", 0.0)
+        if next_discovery_at > 0 and time.monotonic() >= next_discovery_at:
+            self._start_resume_discovery()
             return
         generation = self._resume_reconnect_generation
         ip = str(getattr(self.adb, "ip", "") or "").strip()
@@ -341,6 +448,9 @@ class DeviceFeaturesMixin:
         self._start_resume_reconnect("显示器已唤醒")
 
     def _cancel_resume_reconnect(self):
+        discovery_cancel = getattr(self, "_resume_discovery_cancel_event", None)
+        if discovery_cancel is not None:
+            discovery_cancel.set()
         self._resume_reconnect_generation = getattr(self, "_resume_reconnect_generation", 0) + 1
         self._resume_reconnect_active = False
         self._resume_reconnect_checking = False
@@ -348,6 +458,10 @@ class DeviceFeaturesMixin:
         self._resume_network_signature = None
         self._resume_target_probe_checking = False
         self._resume_target_available = None
+        self._resume_discovery_checking = False
+        self._resume_discovery_cancel_event = None
+        self._resume_next_discovery_at = 0.0
+        self._resume_manual_selection_required = False
         retry_timer = getattr(self, "_resume_retry_timer", None)
         if retry_timer is not None:
             retry_timer.stop()
@@ -705,6 +819,12 @@ class DeviceFeaturesMixin:
         if getattr(self, "_connection_in_progress", False):
             self.log("设备正在连接，跳过内网扫描")
             return
+        if getattr(self, "_resume_discovery_checking", False):
+            self.log("显示器地址扫描已在进行中，忽略重复请求")
+            return
+        if getattr(self, "_resume_target_probe_checking", False):
+            self.log("旧 IP 状态探测正在进行，忽略内网扫描")
+            return
         if getattr(self, "_scan_running", False):
             self.log("内网扫描已在进行中，忽略重复请求")
             return
@@ -767,10 +887,18 @@ class DeviceFeaturesMixin:
         self.status_signal.emit(f"扫描完成: {len(dev_list)}台")
         if getattr(self, "adb_connected", False):
             return
-        for index, (_ip, model) in enumerate(dev_list):
-            if is_mitv_model(model):
-                self._on_dev_sel(index)
-                break
+        mitv_indexes = [
+            index
+            for index, (_ip, model) in enumerate(dev_list)
+            if is_mitv_model(model)
+        ]
+        if len(mitv_indexes) == 1:
+            self._on_dev_sel(mitv_indexes[0])
+        elif len(mitv_indexes) > 1:
+            if getattr(self, "_resume_waiting_for_network", False):
+                self._resume_manual_selection_required = True
+                self._resume_next_discovery_at = 0.0
+            self.log(f"扫描发现 {len(mitv_indexes)} 台显示器，请手动选择")
 
     def _update_scanned_devices(self, scan_id, dev_list):
         if scan_id != getattr(self, "_scan_id", -1):
@@ -781,11 +909,15 @@ class DeviceFeaturesMixin:
         for ip, model in dev_list:
             self.dev_combo.addItem(f"{model} ({ip})")
         preferred_index = 0
+        mitv_count = 0
         for i, (_ip, model) in enumerate(dev_list):
             if is_mitv_model(model):
-                preferred_index = i
-                break
-        if dev_list:
+                mitv_count += 1
+                if mitv_count == 1:
+                    preferred_index = i
+        if mitv_count > 1:
+            self.dev_combo.setCurrentIndex(-1)
+        elif dev_list:
             self.dev_combo.setCurrentIndex(preferred_index)
         self.dev_combo.blockSignals(False)
 

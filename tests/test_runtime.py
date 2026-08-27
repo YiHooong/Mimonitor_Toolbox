@@ -8,6 +8,7 @@ import threading
 import time
 import unittest
 from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest import mock
 
 from PyQt6.QtCore import Qt
@@ -470,7 +471,7 @@ class SettingsTests(unittest.TestCase):
 
 
 class ScanLifecycleTests(unittest.TestCase):
-    def test_finish_scan_auto_connects_first_mitv_only(self):
+    def test_finish_scan_requires_manual_choice_when_multiple_mitv_devices_exist(self):
         emitted = []
         selected = []
         updated = []
@@ -516,6 +517,37 @@ class ScanLifecycleTests(unittest.TestCase):
         self.assertTrue(fake.scan_btn.enabled)
         self.assertEqual(updated, [(7, devices)])
         self.assertEqual(emitted, [("扫描完成: 3台",)])
+        self.assertEqual(selected, [])
+
+    def test_finish_scan_auto_connects_when_exactly_one_mitv_exists(self):
+        selected = []
+
+        class Signal:
+            def emit(self, *_args):
+                pass
+
+        class Button:
+            def setEnabled(self, _enabled):
+                pass
+
+        fake = SimpleNamespace(
+            _scan_id=7,
+            _scan_running=True,
+            _scan_cancel_event=threading.Event(),
+            adb_connected=False,
+            status_signal=Signal(),
+            scan_btn=Button(),
+            _update_scanned_devices=lambda _scan_id, _devices: None,
+            _on_dev_sel=selected.append,
+            log=lambda _message: None,
+        )
+        devices = [
+            ("192.168.5.2", "Pixel 9"),
+            ("192.168.5.5", "MiTV-MFFU1"),
+        ]
+
+        app.App._finish_scan(fake, 7, "completed", devices, "")
+
         self.assertEqual(selected, [1])
 
     def test_stale_scan_completion_is_ignored(self):

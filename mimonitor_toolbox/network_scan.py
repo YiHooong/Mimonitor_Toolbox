@@ -17,6 +17,7 @@ IF_TYPE_ETHERNET_CSMACD = 6
 IF_TYPE_IEEE80211 = 71
 MAX_TOTAL_PROBE_TARGETS = 4096
 MAX_PROBE_WORKERS = 64
+PROBE_RETRY_DELAY_SECONDS = 1.5
 
 AF_INET = 2
 ERROR_BUFFER_OVERFLOW = 111
@@ -516,24 +517,45 @@ def probe_tcp_targets(
             return None
 
     results: list[ProbeResult] = []
-    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="lan-probe") as executor:
-        futures = []
-        for target in target_list:
-            if cancel_event.is_set():
-                break
-            futures.append(executor.submit(probe, target))
-        for future in as_completed(futures):
-            if cancel_event.is_set():
-                for pending in futures:
-                    pending.cancel()
-                break
-            try:
-                result = future.result()
-            except Exception as exc:
-                _log(log, f"[扫描] TCP 探测任务异常: {exc}")
-                continue
-            if result is not None:
-                results.append(result)
+    pending_targets = target_list
+    for pass_index in range(2):
+        retry_targets: list[ProbeTarget] = []
+        with ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="lan-probe",
+        ) as executor:
+            futures = {}
+            for target in pending_targets:
+                if cancel_event.is_set():
+                    break
+                futures[executor.submit(probe, target)] = target
+            for future in as_completed(futures):
+                if cancel_event.is_set():
+                    for queued in futures:
+                        queued.cancel()
+                    break
+                target = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    _log(log, f"[扫描] TCP 探测任务异常: {exc}")
+                    retry_targets.append(target)
+                    continue
+                if result is None:
+                    retry_targets.append(target)
+                else:
+                    results.append(result)
+
+        if cancel_event.is_set() or pass_index == 1 or not retry_targets:
+            break
+        _log(
+            log,
+            f"[扫描] 首轮未开放地址 {len(retry_targets)} 个，"
+            f"{PROBE_RETRY_DELAY_SECONDS:g} 秒后复查",
+        )
+        if cancel_event.wait(PROBE_RETRY_DELAY_SECONDS):
+            break
+        pending_targets = retry_targets
 
     results.sort(key=lambda item: int(item.ip))
     _log(log, f"[扫描] 端口探测完成，{len(results)} 个 IP 的 {port} 端口开放")

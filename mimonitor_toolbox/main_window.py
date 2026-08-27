@@ -73,6 +73,7 @@ class App(PagesMixin, DisplayFeaturesMixin, DeviceFeaturesMixin, FluentWindow):
     resume_reconnect_finished = pyqtSignal(int, int, bool, str)
     connection_recovery_requested = pyqtSignal(int, str, str)
     reconnect_target_probe_finished = pyqtSignal(int, bool)
+    resume_discovery_finished = pyqtSignal(int, list, str)
 
     def __init__(self):
         super().__init__()
@@ -115,6 +116,7 @@ class App(PagesMixin, DisplayFeaturesMixin, DeviceFeaturesMixin, FluentWindow):
         self.resume_reconnect_finished.connect(self._finish_resume_reconnect_attempt)
         self.connection_recovery_requested.connect(self._handle_connection_recovery_request)
         self.reconnect_target_probe_finished.connect(self._finish_reconnect_target_probe)
+        self.resume_discovery_finished.connect(self._finish_resume_discovery)
         set_async_error_handler(self._report_background_error)
 
         # Setup layout and components

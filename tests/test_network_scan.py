@@ -132,9 +132,57 @@ class TcpProbeTests(unittest.TestCase):
         with mock.patch.object(network_scan.socket, "create_connection", side_effect=OSError("offline")):
             self.assertFalse(probe("192.168.5.205", 5555, timeout=0.4))
 
+    def test_closed_target_is_retried_once_and_can_open_on_second_pass(self):
+        attempts = {}
+
+        class ImmediateRetryEvent(threading.Event):
+            def wait(self, timeout=None):
+                return self.is_set()
+
+        class FakeSocket:
+            def __init__(self, family, sock_type):
+                pass
+
+            def settimeout(self, value):
+                pass
+
+            def bind(self, address):
+                pass
+
+            def connect_ex(self, address):
+                attempts[address] = attempts.get(address, 0) + 1
+                return 0 if attempts[address] == 2 else 10061
+
+            def close(self):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                self.close()
+
+        target = ProbeTarget(
+            ipaddress.IPv4Address("192.168.5.5"),
+            ipaddress.IPv4Address("192.168.5.10"),
+        )
+
+        results = probe_tcp_targets(
+            [target],
+            ImmediateRetryEvent(),
+            socket_factory=FakeSocket,
+        )
+
+        self.assertEqual([str(item.ip) for item in results], ["192.168.5.5"])
+        self.assertEqual(attempts[("192.168.5.5", 5555)], 2)
+
     def test_binds_source_closes_sockets_and_sorts_open_results(self):
         created = []
         open_ips = {"192.168.5.2", "192.168.5.30"}
+
+        class ImmediateRetryEvent(threading.Event):
+            def wait(self, timeout=None):
+                return self.is_set()
 
         class FakeSocket:
             def __init__(self, family, sock_type):
@@ -173,7 +221,7 @@ class TcpProbeTests(unittest.TestCase):
 
         results = probe_tcp_targets(
             targets,
-            threading.Event(),
+            ImmediateRetryEvent(),
             timeout=0.4,
             max_workers=2,
             socket_factory=FakeSocket,
@@ -186,7 +234,7 @@ class TcpProbeTests(unittest.TestCase):
                 ("192.168.5.30", "192.168.5.10"),
             ],
         )
-        self.assertEqual(len(created), 3)
+        self.assertEqual(len(created), 4)
         self.assertTrue(all(item.timeout == 0.4 for item in created))
         self.assertTrue(all(item.bound[1] == 0 for item in created))
         self.assertTrue(all(item.closed for item in created))

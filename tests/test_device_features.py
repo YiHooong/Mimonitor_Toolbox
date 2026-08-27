@@ -55,6 +55,10 @@ class ReconnectHost(device_features.DeviceFeaturesMixin):
         self._resume_network_signature = None
         self._resume_target_probe_checking = False
         self._resume_target_available = None
+        self._resume_discovery_checking = False
+        self._resume_discovery_cancel_event = None
+        self._resume_next_discovery_at = 0.0
+        self._resume_manual_selection_required = False
         self._resume_retry_timer = FakeTimer()
         self._resume_network_timer = FakeTimer()
         self.status_signal = FakeSignal()
@@ -62,6 +66,10 @@ class ReconnectHost(device_features.DeviceFeaturesMixin):
         self.resume_reconnect_finished = FakeSignal()
         self.connection_recovery_requested = FakeSignal()
         self.reconnect_target_probe_finished = FakeSignal()
+        self.resume_discovery_finished = FakeSignal()
+        self.devices_signal = FakeSignal()
+        self._scan_id = 0
+        self.ip_entry = SimpleNamespace(setText=lambda _value: None)
 
     def log(self, message):
         self.logs.append(message)
@@ -84,6 +92,38 @@ class DeviceFeatureContractTests(unittest.TestCase):
             "_refresh_page_data",
         }
         self.assertTrue(expected.issubset(vars(DeviceFeaturesMixin)))
+
+    def test_multiple_mitv_results_leave_device_selector_unselected(self):
+        class Combo:
+            def __init__(self):
+                self.items = []
+                self.current_index = None
+
+            def blockSignals(self, _blocked):
+                pass
+
+            def clear(self):
+                self.items.clear()
+
+            def addItem(self, text):
+                self.items.append(text)
+
+            def setCurrentIndex(self, index):
+                self.current_index = index
+
+        host = SimpleNamespace(_scan_id=7, dev_combo=Combo())
+        devices = [
+            ("192.168.5.5", "MiTV-MFFU1"),
+            ("192.168.5.6", "MiTV-SECOND"),
+        ]
+
+        device_features.DeviceFeaturesMixin._update_scanned_devices(
+            host,
+            7,
+            devices,
+        )
+
+        self.assertEqual(host.dev_combo.current_index, -1)
 
 
 class TerminalLaunchTests(unittest.TestCase):
@@ -201,6 +241,227 @@ class WindowsResumeReconnectTests(unittest.TestCase):
             5,
         )
         self.assertIn("等待显示器或网络恢复", host.status_signal.events[-1][0])
+
+    def test_fifth_failure_discovers_unique_mitv_and_switches_to_new_ip(self):
+        host = ReconnectHost()
+        reconnect_reasons = []
+        entered_ips = []
+        host.ip_entry = SimpleNamespace(setText=entered_ips.append)
+        host._start_resume_reconnect = reconnect_reasons.append
+        host.resume_discovery_finished.callback = lambda *args: (
+            device_features.DeviceFeaturesMixin._finish_resume_discovery(host, *args)
+        )
+
+        with mock.patch.object(
+            device_features,
+            "scan_adb",
+            return_value=[("192.168.5.5", "MiTV-MFFU1")],
+        ), mock.patch.object(
+            device_features,
+            "async_run",
+            side_effect=lambda fn: fn(),
+        ), mock.patch.object(device_features, "update_settings") as save_settings:
+            host._finish_resume_reconnect_attempt(0, 5, False, "not found")
+
+        self.assertEqual(host.adb.ip, "192.168.5.5")
+        self.assertEqual(entered_ips, ["192.168.5.5"])
+        save_settings.assert_called_once_with({"saved_ip": "192.168.5.5"})
+        self.assertEqual(reconnect_reasons, ["局域网发现显示器"])
+
+    def test_waiting_recovery_throttles_full_network_discovery_to_thirty_seconds(self):
+        host = ReconnectHost()
+        host._resume_reconnect_generation = 4
+        host._resume_waiting_for_network = True
+        host._resume_network_signature = ((7, "192.168.5.8", "192.168.5.0/24"),)
+        host._resume_next_discovery_at = 130.0
+        host._network_signature = lambda: host._resume_network_signature
+        host.reconnect_target_probe_finished.callback = host._finish_reconnect_target_probe
+        host.resume_discovery_finished.callback = host._finish_resume_discovery
+
+        with mock.patch.object(
+            device_features.time,
+            "monotonic",
+            side_effect=[129.0, 130.0, 130.0, 130.0],
+        ), mock.patch.object(
+            device_features,
+            "is_tcp_endpoint_open",
+            return_value=False,
+        ), mock.patch.object(
+            device_features,
+            "scan_adb",
+            return_value=[],
+        ) as scan, mock.patch.object(
+            device_features,
+            "async_run",
+            side_effect=lambda fn: fn(),
+        ):
+            host._check_resume_network_change()
+            host._check_resume_network_change()
+
+        scan.assert_called_once()
+        self.assertEqual(host._resume_next_discovery_at, 160.0)
+
+    def test_fresh_old_ip_retry_cycle_preserves_existing_full_scan_deadline(self):
+        host = ReconnectHost()
+        host._resume_waiting_for_network = True
+        host._resume_next_discovery_at = 200.0
+        host._network_signature = lambda: ((7, "192.168.5.8", "192.168.5.0/24"),)
+        host._run_resume_reconnect_attempt = lambda: None
+
+        with mock.patch.object(
+            device_features.time,
+            "monotonic",
+            return_value=100.0,
+        ), mock.patch.object(device_features, "scan_adb") as scan:
+            host._start_resume_reconnect("旧 IP 端口恢复")
+            host._finish_resume_reconnect_attempt(
+                host._resume_reconnect_generation,
+                5,
+                False,
+                "not found",
+            )
+
+        scan.assert_not_called()
+        self.assertEqual(host._resume_next_discovery_at, 200.0)
+
+    def test_due_discovery_waits_for_inflight_old_ip_probe(self):
+        host = ReconnectHost()
+        host._resume_reconnect_generation = 4
+        host._resume_waiting_for_network = True
+        host._resume_network_signature = ((7, "192.168.5.8", "192.168.5.0/24"),)
+        host._resume_target_probe_checking = True
+        host._resume_next_discovery_at = 100.0
+        host._network_signature = lambda: host._resume_network_signature
+
+        with mock.patch.object(
+            device_features.time,
+            "monotonic",
+            return_value=100.0,
+        ), mock.patch.object(device_features, "scan_adb") as scan:
+            host._check_resume_network_change()
+
+        scan.assert_not_called()
+        self.assertFalse(host._resume_discovery_checking)
+
+    def test_recovery_discovery_waits_for_manual_scan_to_finish(self):
+        host = ReconnectHost()
+        host._resume_waiting_for_network = True
+        host._scan_running = True
+
+        with mock.patch.object(
+            device_features.time,
+            "monotonic",
+            return_value=100.0,
+        ), mock.patch.object(device_features, "scan_adb") as scan:
+            host._start_resume_discovery()
+
+        scan.assert_not_called()
+        self.assertFalse(host._resume_discovery_checking)
+        self.assertEqual(host._resume_next_discovery_at, 130.0)
+
+    def test_manual_scan_is_ignored_while_recovery_discovery_is_running(self):
+        host = ReconnectHost()
+        host._connection_in_progress = False
+        host._scan_running = False
+        host._resume_discovery_checking = True
+        host.scan_btn = SimpleNamespace(setEnabled=lambda _enabled: None)
+        host.dev_combo = SimpleNamespace(clear=lambda: None)
+        workers = []
+
+        with mock.patch.object(device_features, "async_run", side_effect=workers.append):
+            host.scan_net()
+
+        self.assertEqual(workers, [])
+        self.assertEqual(host.logs[-1], "显示器地址扫描已在进行中，忽略重复请求")
+
+    def test_manual_scan_is_ignored_while_old_ip_probe_is_running(self):
+        host = ReconnectHost()
+        host._connection_in_progress = False
+        host._scan_running = False
+        host._resume_target_probe_checking = True
+        host.scan_btn = SimpleNamespace(setEnabled=lambda _enabled: None)
+        host.dev_combo = SimpleNamespace(clear=lambda: None)
+        workers = []
+
+        with mock.patch.object(device_features, "async_run", side_effect=workers.append):
+            host.scan_net()
+
+        self.assertEqual(workers, [])
+        self.assertEqual(host.logs[-1], "旧 IP 状态探测正在进行，忽略内网扫描")
+
+    def test_old_ip_probe_waits_for_manual_scan_to_finish(self):
+        host = ReconnectHost()
+        host._resume_reconnect_generation = 4
+        host._resume_waiting_for_network = True
+        host._scan_running = True
+        host._resume_network_signature = ((7, "192.168.5.8", "192.168.5.0/24"),)
+        host._network_signature = lambda: host._resume_network_signature
+
+        with mock.patch.object(
+            device_features,
+            "is_tcp_endpoint_open",
+        ) as probe, mock.patch.object(
+            device_features,
+            "async_run",
+            side_effect=lambda fn: fn(),
+        ):
+            host._check_resume_network_change()
+
+        probe.assert_not_called()
+        self.assertFalse(host._resume_target_probe_checking)
+
+    def test_recovery_does_not_auto_select_when_multiple_mitv_devices_are_found(self):
+        host = ReconnectHost()
+        host._resume_reconnect_generation = 4
+        host._resume_waiting_for_network = True
+        reconnect_reasons = []
+        host._start_resume_reconnect = reconnect_reasons.append
+        devices = [
+            ("192.168.5.5", "MiTV-MFFU1"),
+            ("192.168.5.6", "MiTV-SECOND"),
+            ("192.168.5.7", "Android TV"),
+        ]
+
+        with mock.patch.object(device_features.time, "monotonic", return_value=100.0):
+            host._finish_resume_discovery(4, devices, "")
+
+        self.assertEqual(host.adb.ip, "192.168.5.205")
+        self.assertEqual(reconnect_reasons, [])
+        self.assertEqual(
+            host.devices_signal.events,
+            [(0, devices[:2])],
+        )
+        self.assertIn("发现 2 台", host.status_signal.events[-1][0])
+
+    def test_multiple_device_ambiguity_blocks_later_single_result_from_switching_ip(self):
+        host = ReconnectHost()
+        host._resume_reconnect_generation = 4
+        host._resume_waiting_for_network = True
+        reconnect_reasons = []
+        host._start_resume_reconnect = reconnect_reasons.append
+
+        with mock.patch.object(
+            device_features.time,
+            "monotonic",
+            side_effect=[100.0, 110.0],
+        ), mock.patch.object(device_features, "update_settings") as save_settings:
+            host._finish_resume_discovery(
+                4,
+                [
+                    ("192.168.5.5", "MiTV-MFFU1"),
+                    ("192.168.5.6", "MiTV-SECOND"),
+                ],
+                "",
+            )
+            host._finish_resume_discovery(
+                4,
+                [("192.168.5.5", "MiTV-MFFU1")],
+                "",
+            )
+
+        self.assertEqual(host.adb.ip, "192.168.5.205")
+        self.assertEqual(reconnect_reasons, [])
+        save_settings.assert_not_called()
 
     def test_network_change_starts_a_fresh_five_attempt_cycle(self):
         host = ReconnectHost()
