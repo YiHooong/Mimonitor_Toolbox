@@ -1,6 +1,6 @@
 # Runtime Assets
 
-Files in this directory are bundled into the PyInstaller executable and used by
+Files in this directory are bundled into the Nuitka executable and used by
 MonitorToolbox at runtime.
 
 - `adb.exe`: ADB client used by the desktop app.

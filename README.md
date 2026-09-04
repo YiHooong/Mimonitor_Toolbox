@@ -75,7 +75,7 @@ service call TvService 3 s16 "sh -c eval\${IFS}CLASSPATH=...\${IFS}MtkDirectTool
 2. 缺失或大小不一致时从本地 push 到 `/sdcard/`
 3. 从 `/sdcard/` 复制到 `/data/data/mitv.service/cache/`
 
-打包后 jar 会从 `assets/runtime/` 嵌入 exe 中（PyInstaller `--add-binary`）。
+打包后 jar 会从 `assets/runtime/` 嵌入 exe 中（Nuitka `--include-data-files`）。
 
 ## 功能
 
@@ -96,8 +96,8 @@ service call TvService 3 s16 "sh -c eval\${IFS}CLASSPATH=...\${IFS}MtkDirectTool
 ```text
 Mimonitor_Toolbox/
 ├─ monitor_controller.py          # 源码运行入口，转发到应用包
-├─ MonitorToolbox.spec            # PyInstaller 打包配置和资源清单
-├─ build.bat                      # Windows 一键打包脚本
+├─ build.bat                      # Windows 一键打包脚本（Nuitka onefile）
+├─ build_nuitka_standalone.bat    # 可选：standalone 文件夹形态打包
 ├─ requirements-build.txt         # 锁定的运行与构建依赖
 ├─ mimonitor_toolbox/             # 主程序包
 │  ├─ app.py                      # Qt 启动、单实例通信和事件循环
@@ -144,11 +144,15 @@ Mimonitor_Toolbox/
 ## 打包
 
 ```bash
-# 安装锁定的构建依赖
+# 安装锁定的构建依赖（需要 python.org 安装的 Python，
+# Microsoft Store 版缺少链接库，无法用于 Nuitka 编译）
 python -m pip install -r requirements-build.txt
 
-# 使用与 build.bat、GitHub Actions 相同的资源清单打包
-python -m PyInstaller --clean --noconfirm MonitorToolbox.spec
+# 一键打包（与 GitHub Actions 相同），产物在 dist-nuitka\MonitorToolbox.exe
+build.bat
+
+# 可选：standalone 文件夹形态（启动更快，zip 整个目录分发）
+build_nuitka_standalone.bat
 ```
 
 ## 依赖

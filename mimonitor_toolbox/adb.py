@@ -14,6 +14,7 @@ from .core import (
     get_app_data_dir,
     get_colorful_led_tool_path,
     get_mtk_direct_tool_path,
+    is_frozen_build,
 )
 from .network_scan import (
     WindowsAdapterError,
@@ -32,7 +33,7 @@ def drain_startup_warnings():
     return warnings
 
 def ensure_persistent_adb_runtime(adb_path):
-    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+    if sys.platform != "win32" or not is_frozen_build():
         return adb_path
     try:
         import shutil

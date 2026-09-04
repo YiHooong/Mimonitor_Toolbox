@@ -88,14 +88,23 @@ def update_settings(changes):
         settings = _load_settings_unlocked()
         settings.update(changes)
         return _write_settings_unlocked(settings)
+def is_frozen_build():
+    """打包态检测：PyInstaller 设置 sys.frozen，Nuitka 注入 __compiled__。"""
+    return bool(getattr(sys, "frozen", False)) or "__compiled__" in globals()
+
 def get_app_base_dir():
-    if getattr(sys, "frozen", False):
+    if is_frozen_build():
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def bundled_resource_path(*parts):
     if hasattr(sys, "_MEIPASS"):
         p = os.path.join(sys._MEIPASS, *parts)
+        if os.path.exists(p):
+            return p
+    if "__compiled__" in globals():
+        # Nuitka 打包：__file__ 位于解包目录的 mimonitor_toolbox/ 包内
+        p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), *parts)
         if os.path.exists(p):
             return p
     p = os.path.join(get_app_base_dir(), *parts)

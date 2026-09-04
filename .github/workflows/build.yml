@@ -55,10 +55,25 @@ jobs:
         run: python -m pip install -r requirements-build.txt
 
       - name: Build exe
-        run: python -m PyInstaller --clean --noconfirm MonitorToolbox.spec
+        run: >-
+          python -m nuitka --onefile --enable-plugin=pyqt6
+          --windows-console-mode=disable
+          --windows-icon-from-ico=assets/app/icon.ico
+          --include-package=qfluentwidgets
+          --include-package-data=qfluentwidgets
+          --include-data-files=assets/runtime/adb.exe=assets/runtime/adb.exe
+          --include-data-files=assets/runtime/AdbWinApi.dll=assets/runtime/AdbWinApi.dll
+          --include-data-files=assets/runtime/AdbWinUsbApi.dll=assets/runtime/AdbWinUsbApi.dll
+          --include-data-files=assets/runtime/MtkDirectTool.jar=assets/runtime/MtkDirectTool.jar
+          --include-data-files=assets/runtime/ColorfulLedTool.jar=assets/runtime/ColorfulLedTool.jar
+          --include-data-files=assets/adb_guardian/adbguardian-signed.apk=assets/adb_guardian/adbguardian-signed.apk
+          --output-filename=MonitorToolbox.exe
+          --output-dir=dist-nuitka
+          --assume-yes-for-downloads
+          monitor_controller.py
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/MonitorToolbox.exe
+          files: dist-nuitka/MonitorToolbox.exe
           generate_release_notes: true
