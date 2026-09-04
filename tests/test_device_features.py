@@ -11,6 +11,19 @@ from PyQt6.QtCore import QObject
 from mimonitor_toolbox import device_features, display_features
 
 
+def adb_reconnect_via_module(adb_obj):
+    """测试替身：走与 Adb.reconnect 相同的模块级调用，让 mock 生效。"""
+    serial = f"{adb_obj.ip}:5555"
+    device_features.adb_run(["disconnect", serial], timeout=3)
+    state = device_features.adb_device_state(serial, timeout=2)
+    if state == "device":
+        return True, state
+    device_features.adb_run(["connect", serial], timeout=5)
+    state = device_features.adb_device_state(serial, timeout=3)
+    return state == "device", state
+
+
+
 class FakeTimer:
     def __init__(self, callback=None):
         self.callback = callback
@@ -42,6 +55,7 @@ class ReconnectHost(device_features.DeviceFeaturesMixin):
         self.adb = SimpleNamespace(
             ip="192.168.5.205",
             transaction=nullcontext,
+            reconnect=lambda: adb_reconnect_via_module(self.adb),
         )
         self.adb_connected = False
         self._cleanup_done = False
@@ -459,7 +473,7 @@ class WindowsResumeReconnectTests(unittest.TestCase):
                 return "MiTV-MONITOR"
             return ""
 
-        with mock.patch.object(device_features, "adb_device_state", side_effect=["offline", "device"]), \
+        with mock.patch.object(device_features, "adb_device_state", side_effect=["offline", "offline", "device"]), \
                 mock.patch.object(device_features, "adb_run", side_effect=fake_adb_run), \
                 mock.patch.object(device_features, "async_run", side_effect=lambda fn: fn()):
             start("Windows 唤醒")
@@ -497,7 +511,8 @@ class WindowsResumeReconnectTests(unittest.TestCase):
         self.assertEqual(host._resume_reconnect_attempt, 5)
         self.assertFalse(host._resume_reconnect_active)
         self.assertTrue(host._resume_waiting_for_network)
-        self.assertEqual(get_state.call_count, 10)
+        # 每次 attempt：初始 get-state 1 次 + reconnect 内部 2 次 = 3 次
+        self.assertEqual(get_state.call_count, 15)
         self.assertEqual(host._resume_retry_timer.start_calls, [3000, 3000, 3000, 3000])
         self.assertEqual(host._resume_network_timer.start_calls, [2000])
         self.assertEqual(
@@ -1071,7 +1086,7 @@ class WindowsResumeReconnectTests(unittest.TestCase):
         requests = []
         host.connection_recovery_requested.callback = lambda *args: requests.append(args)
 
-        with mock.patch.object(device_features, "adb_device_state", side_effect=["offline", "offline"]), \
+        with mock.patch.object(device_features, "adb_device_state", side_effect=["offline", "offline", "offline"]), \
                 mock.patch.object(device_features, "adb_run", return_value=""), \
                 mock.patch.object(device_features, "async_run", side_effect=lambda fn: fn()):
             host._keep_adb_alive()

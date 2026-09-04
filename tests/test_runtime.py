@@ -137,7 +137,10 @@ class AdbRuntimeTests(unittest.TestCase):
         with mock.patch.object(adb_runtime, "adb_run", side_effect=fake_adb_run):
             self.assertFalse(adb_runtime.Adb("192.168.5.205").connect())
 
+        # connect 现在复用 ensure_connected：先查状态，offline 才执行
+        # adb connect，随后无论输出再查一次状态，仍 offline 则失败。
         self.assertEqual(calls, [
+            ["-s", "192.168.5.205:5555", "get-state"],
             ["connect", "192.168.5.205:5555"],
             ["-s", "192.168.5.205:5555", "get-state"],
         ])
@@ -175,6 +178,11 @@ class AdbRuntimeTests(unittest.TestCase):
             def emit(self, *args):
                 events.append(args)
 
+        def fake_reconnect():
+            commands.append(["disconnect", "192.168.5.205:5555"])
+            commands.append(["connect", "192.168.5.205:5555"])
+            return False, "offline"
+
         class FakeApp:
             _cleanup_done = False
             _windows_session_ending = False
@@ -186,7 +194,11 @@ class AdbRuntimeTests(unittest.TestCase):
             adb = type(
                 "FakeAdb",
                 (),
-                {"ip": "192.168.5.205", "transaction": staticmethod(nullcontext)},
+                {
+                    "ip": "192.168.5.205",
+                    "transaction": staticmethod(nullcontext),
+                    "reconnect": staticmethod(fake_reconnect),
+                },
             )()
             _adb_keepalive_checking = False
             _adb_busy_until = 0.0

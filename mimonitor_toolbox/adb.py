@@ -138,12 +138,6 @@ def adb_text_has_disconnected_marker(text):
     lower = str(text or "").lower()
     return any(marker in lower for marker in ADB_DISCONNECTED_MARKERS)
 
-def adb_connect_output_ok(text):
-    lower = str(text or "").lower()
-    if adb_text_has_disconnected_marker(lower):
-        return False
-    return "connected to" in lower or "already connected to" in lower
-
 def adb_device_state(serial, timeout=3):
     out = adb_run(["-s", serial, "get-state"], timeout=timeout).strip()
     lower = out.lower()
@@ -367,8 +361,10 @@ class Adb:
         )
 
     def connect(self):
-        o = adb_run(["connect", self.serial])
-        return adb_connect_output_ok(o) and self.device_state(timeout=3) == "device"
+        # adb connect 客户端超时被杀时输出为空，但独立 ADB server 可能
+        # 已在后台建立 transport；连接成败只以 get-state 为准。
+        ok, _state = self.ensure_connected()
+        return ok
     def ensure_connected(self):
         if not self.ip:
             return False, "unknown"
@@ -378,6 +374,16 @@ class Adb:
         adb_run(["connect", self.serial], timeout=5)
         state = adb_device_state(self.serial, timeout=3)
         return state == "device", state
+    def reconnect(self):
+        """强制重连：先 disconnect 清除 stale transport 再 ensure_connected。
+
+        TCP 已断但 server 仍持有旧 transport 时，adb connect 会返回
+        "already connected" 而实际不可用，必须先 disconnect。
+        """
+        if not self.ip:
+            return False, "unknown"
+        adb_run(["disconnect", self.serial], timeout=3)
+        return self.ensure_connected()
     def device_state(self, timeout=3):
         if not self.ip:
             return "unknown"
@@ -512,27 +518,22 @@ def scan_adb(cb=None, log=None, cancel_event=None):
         if cancel_event.is_set():
             break
         ip = str(result.ip)
-        serial = format_adb_serial(ip)
+        target = Adb(ip)
         try:
             if log:
-                log(f"[扫描] {serial} 开放，正在验证...")
-            output = adb_run(["connect", serial], 5)
-            if log:
-                log(f"[扫描] {ip} adb: {output}")
-            if not adb_connect_output_ok(output):
-                continue
+                log(f"[扫描] {target.serial} 开放，正在验证...")
+            # 连接成败只以 get-state 为准：connect 输出为空（客户端超时被杀）
+            # 不代表失败，独立 ADB server 可能已建立 transport。
             if cancel_event.is_set():
                 continue
-            state = adb_device_state(serial, timeout=3)
+            state = target.ensure_connected()[1]
             if state != "device":
                 if log:
                     log(f"[扫描] {ip} 状态为 {state}，跳过")
                 continue
             if cancel_event.is_set():
                 continue
-            model = adb_run(
-                ["-s", serial, "shell", "getprop ro.product.model"], 3
-            ).strip()
+            model = target.shell("getprop ro.product.model", check=False).strip()
             if not model or adb_text_has_disconnected_marker(model):
                 continue
             found.append((ip, model))
@@ -542,7 +543,7 @@ def scan_adb(cb=None, log=None, cancel_event=None):
             if log:
                 log(f"[扫描] 验证 {ip} 失败: {exc}")
         finally:
-            adb_run(["disconnect", serial], 3)
+            adb_run(["disconnect", target.serial], 3)
 
     if log:
         mitv_count = sum(1 for _ip, model in found if is_mitv_model(model))

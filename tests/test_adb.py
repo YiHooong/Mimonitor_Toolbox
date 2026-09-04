@@ -155,5 +155,134 @@ __MIMONITOR_BATCH_END__
         self.assertIn("denied", warnings[0])
 
 
+class ConnectByDeviceStateTests(unittest.TestCase):
+    """connect 输出为空（客户端超时被杀）时以 get-state 为唯一裁决。"""
+
+    def _patch_adb_run(self, connect_output, states):
+        """states: get-state 依次返回的值列表（每次调用消耗一个）。"""
+        from mimonitor_toolbox import adb as adb_runtime
+        state_outputs = list(states)
+        calls = []
+
+        def fake_adb_run(args, timeout=10, check=False):
+            calls.append(list(args))
+            if args[0] == "connect":
+                return connect_output
+            if "get-state" in args:
+                return state_outputs.pop(0) if state_outputs else "unknown"
+            return ""
+
+        return mock.patch.object(adb_runtime, "adb_run", side_effect=fake_adb_run), calls
+
+    def test_manual_connect_succeeds_on_empty_output_with_device_state(self):
+        from mimonitor_toolbox import adb as adb_runtime
+
+        # connect 输出为空 + 首次 get-state 即 device（server 已建好 transport）
+        patcher, calls = self._patch_adb_run("", ["device"])
+        with patcher:
+            ok = adb_runtime.Adb("192.168.1.9").connect()
+
+        self.assertTrue(ok)
+        get_state_called = any("get-state" in c for c in calls)
+        self.assertTrue(get_state_called)
+
+    def test_manual_connect_succeeds_after_empty_connect_output_then_device(self):
+        from mimonitor_toolbox import adb as adb_runtime
+
+        # connect 空输出，首次 get-state 失败、connect 后再查为 device
+        patcher, _ = self._patch_adb_run("", ["offline", "device"])
+        with patcher:
+            ok = adb_runtime.Adb("192.168.1.9").connect()
+
+        self.assertTrue(ok)
+
+    def test_manual_connect_fails_on_empty_output_and_bad_state(self):
+        from mimonitor_toolbox import adb as adb_runtime
+
+        patcher, _ = self._patch_adb_run("", ["offline", "offline"])
+        with patcher:
+            ok = adb_runtime.Adb("192.168.1.9").connect()
+
+        self.assertFalse(ok)
+
+    def _scan_with(self, state_output, model_output):
+        import ipaddress
+
+        from mimonitor_toolbox import adb as adb_runtime
+        networks = [mock.Mock(ip=ipaddress.ip_address("192.168.1.0"), netmask="255.255.255.0")]
+        probe_results = [mock.Mock(ip=ipaddress.ip_address("192.168.1.9"))]
+
+        def fake_adb_run(args, timeout=10, check=False):
+            if args[0] == "connect":
+                return ""  # 客户端超时被杀，空输出
+            if "get-state" in args:
+                return state_output
+            if "getprop ro.product.model" in args:
+                return model_output
+            return ""
+
+        with mock.patch.object(adb_runtime, "get_windows_scan_networks", return_value=networks), \
+                mock.patch.object(adb_runtime, "build_probe_targets", return_value=probe_results), \
+                mock.patch.object(adb_runtime, "probe_tcp_targets", return_value=probe_results), \
+                mock.patch.object(adb_runtime, "adb_run", side_effect=fake_adb_run):
+            return adb_runtime.scan_adb()
+
+    def test_scan_discovers_device_with_empty_connect_output(self):
+        self.assertEqual(
+            self._scan_with("device", "xiaomi mitv pro"),
+            [("192.168.1.9", "xiaomi mitv pro")],
+        )
+
+    def test_scan_skips_device_with_empty_output_and_offline_state(self):
+        self.assertEqual(self._scan_with("offline", ""), [])
+
+    def test_reconnect_disconnects_then_ensures_device_state(self):
+        from mimonitor_toolbox import adb as adb_runtime
+
+        # reconnect = disconnect 清 stale transport + ensure_connected
+        state_outputs = ["offline", "device"]
+        calls = []
+
+        def fake_adb_run(args, timeout=10, check=False):
+            calls.append(list(args))
+            if args[0] == "disconnect":
+                return "disconnected"
+            if args[0] == "connect":
+                return "connected to 192.168.1.9:5555"
+            if "get-state" in args:
+                return state_outputs.pop(0) if state_outputs else "unknown"
+            return ""
+
+        with mock.patch.object(adb_runtime, "adb_run", side_effect=fake_adb_run):
+            ok, state = adb_runtime.Adb("192.168.1.9").reconnect()
+
+        self.assertTrue(ok)
+        self.assertEqual(state, "device")
+        self.assertEqual(calls, [
+            ["disconnect", "192.168.1.9:5555"],
+            ["-s", "192.168.1.9:5555", "get-state"],
+            ["connect", "192.168.1.9:5555"],
+            ["-s", "192.168.1.9:5555", "get-state"],
+        ])
+
+    def test_reconnect_fails_when_state_stays_offline(self):
+        from mimonitor_toolbox import adb as adb_runtime
+
+        def fake_adb_run(args, timeout=10, check=False):
+            if args[0] == "disconnect":
+                return "disconnected"
+            if args[0] == "connect":
+                return "connected to 192.168.1.9:5555"
+            if "get-state" in args:
+                return "offline"
+            return ""
+
+        with mock.patch.object(adb_runtime, "adb_run", side_effect=fake_adb_run):
+            ok, state = adb_runtime.Adb("192.168.1.9").reconnect()
+
+        self.assertFalse(ok)
+        self.assertEqual(state, "offline")
+
+
 if __name__ == "__main__":
     unittest.main()

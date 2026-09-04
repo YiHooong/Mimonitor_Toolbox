@@ -322,12 +322,7 @@ class DeviceFeaturesMixin:
                         if not self._connection_intent_is_current(intent_generation, ip):
                             detail = "连接请求已取消"
                             return
-                        adb_run(["disconnect", serial], timeout=3)
-                        if not self._connection_intent_is_current(intent_generation, ip):
-                            detail = "连接请求已取消"
-                            return
-                        adb_run(["connect", serial], timeout=5)
-                        state = adb_device_state(serial, timeout=3)
+                        _ok_reconnected, state = self.adb.reconnect()
                     if state == "device":
                         if not self._connection_intent_is_current(intent_generation, ip):
                             detail = "连接请求已取消"
@@ -660,11 +655,7 @@ class DeviceFeaturesMixin:
                     # 先 disconnect 清除可能存在的 stale transport，
                     # 否则 adb connect 会返回 "already connected" 但实际 TCP 已断
                     self.status_signal.emit(f"连接中...（{adb_device_state_label(state)}，正在重连）")
-                    adb_run(["disconnect", serial], timeout=3)
-                    if not self._connection_intent_is_current(intent_generation, ip):
-                        return
-                    adb_run(["connect", serial], timeout=5)
-                    state = adb_device_state(serial, timeout=3)
+                    state = self.adb.reconnect()[1]
                     if not self._connection_intent_is_current(intent_generation, ip):
                         return
                     if state != "device":
@@ -1187,7 +1178,7 @@ class DeviceFeaturesMixin:
                     self._enable_guardian_accessibility()
                     self._start_guardian_commands()
                     time.sleep(3)
-                    adb_run(["connect", serial], timeout=5)
+                    self.adb.reconnect()
                     status = self._read_guardian_status()
                 self.guardian_status_signal.emit(status)
                 if status.get("ok"):
