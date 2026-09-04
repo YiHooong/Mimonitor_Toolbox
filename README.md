@@ -97,7 +97,8 @@ service call TvService 3 s16 "sh -c eval\${IFS}CLASSPATH=...\${IFS}MtkDirectTool
 Mimonitor_Toolbox/
 ├─ monitor_controller.py          # 源码运行入口，转发到应用包
 ├─ build.bat                      # Windows 一键打包脚本（Nuitka onefile）
-├─ build_nuitka_standalone.bat    # 可选：standalone 文件夹形态打包
+├─ build_installer.bat            # standalone 便携 zip + Inno Setup 安装器
+├─ installer/MonitorToolbox.iss   # Inno Setup 安装器脚本
 ├─ requirements-build.txt         # 锁定的运行与构建依赖
 ├─ mimonitor_toolbox/             # 主程序包
 │  ├─ app.py                      # Qt 启动、单实例通信和事件循环
@@ -147,13 +148,17 @@ Mimonitor_Toolbox/
 # 安装锁定的构建依赖（需要 python.org 安装的 Python，
 # Microsoft Store 版缺少链接库，无法用于 Nuitka 编译）
 python -m pip install -r requirements-build.txt
-
-# 一键打包（与 GitHub Actions 相同），产物在 dist-nuitka\MonitorToolbox.exe
-build.bat
-
-# 可选：standalone 文件夹形态（启动更快，zip 整个目录分发）
-build_nuitka_standalone.bat
 ```
+
+三种分发形态（GitHub Actions 打 tag 时自动全部产出）：
+
+| 产物 | 脚本 | 说明 |
+| --- | --- | --- |
+| `MonitorToolbox.exe` | `build.bat` | Nuitka onefile 单文件，29 MB |
+| `MonitorToolbox-portable.zip` | `build_installer.bat` | standalone 便携版，解压即用，启动最快 |
+| `MonitorToolbox-Setup.exe` | `build_installer.bat` | Inno Setup 安装器，带快捷方式与卸载入口 |
+
+安装器构建依赖 Inno Setup（`winget install JRSoftware.InnoSetup`，或解压安装到 `%LOCALAPPDATA%\InnoSetup` 后脚本自动识别）。
 
 ## 依赖
 

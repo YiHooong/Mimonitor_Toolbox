@@ -1,5 +1,5 @@
 @echo off
-rem Nuitka onefile æ‰“åŒ…ã€‚éœ€è¦ python.org å®‰è£…çš„ Pythonï¼ˆMicrosoft Store ç‰ˆç¼ºå°‘é“¾æ¥åº“ï¼Œæ— æ³•ç¼–è¯‘ï¼‰ã€‚
+rem Nuitka onefile ´ò°ü¡£ĞèÒª python.org °²×°µÄ Python£¨Microsoft Store °æÈ±ÉÙÁ´½Ó¿â£¬ÎŞ·¨±àÒë£©¡£
 set PY=%LOCALAPPDATA%\Programs\Python\Python313\python.exe
 if not exist "%PY%" set PY=python
 "%PY%" -m pip install -r requirements-build.txt

@@ -45,5 +45,63 @@ class CoreSettingsTests(unittest.TestCase):
         self.assertEqual(actual, expected)
 
 
+class CleanupStaleExtractDirsTests(unittest.TestCase):
+    """验证 onefile/_MEI 残留清理只删除死实例的解压目录。"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.base = Path(self.temp_dir.name)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _make_dir(self, name, dll_name="python313.dll"):
+        d = self.base / name
+        d.mkdir()
+        if dll_name:
+            (d / dll_name).write_bytes(b"fake dll")
+        return d
+
+    def test_removes_dead_extract_dirs(self):
+        from mimonitor_toolbox import core
+
+        dead_onefile = self._make_dir("onefile_123_456")
+        dead_mei = self._make_dir("_MEI12345")
+        self._make_dir("unrelated_dir", dll_name=None)
+
+        core.cleanup_stale_extract_dirs(str(self.base))
+
+        self.assertFalse(dead_onefile.exists())
+        self.assertFalse(dead_mei.exists())
+
+    def test_skips_dirs_without_python_dll(self):
+        from mimonitor_toolbox import core
+
+        suspicious = self._make_dir("onefile_789", dll_name=None)
+        (suspicious / "some.txt").write_text("data", encoding="utf-8")
+
+        core.cleanup_stale_extract_dirs(str(self.base))
+
+        self.assertTrue(suspicious.exists())
+
+    def test_skips_locked_dll_dir(self):
+        from mimonitor_toolbox import core
+
+        locked = self._make_dir("onefile_999_1")
+        dll_path = locked / "python313.dll"
+        original_open = open
+
+        def refusing_open(path, mode="r", *args, **kwargs):
+            if str(path) == str(dll_path) and "+" in mode:
+                raise PermissionError(13, "denied")
+            return original_open(path, mode, *args, **kwargs)
+
+        with mock.patch("builtins.open", side_effect=refusing_open):
+            core.cleanup_stale_extract_dirs(str(self.base))
+
+        self.assertTrue(locked.exists())
+        self.assertTrue(dll_path.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

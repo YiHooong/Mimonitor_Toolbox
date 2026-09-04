@@ -54,7 +54,7 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements-build.txt
 
-      - name: Build exe
+      - name: Build exe (onefile)
         run: >-
           python -m nuitka --onefile --enable-plugin=pyqt6
           --windows-console-mode=disable
@@ -72,8 +72,45 @@ jobs:
           --assume-yes-for-downloads
           monitor_controller.py
 
+      - name: Build standalone
+        run: >-
+          python -m nuitka --standalone --enable-plugin=pyqt6
+          --windows-console-mode=disable
+          --windows-icon-from-ico=assets/app/icon.ico
+          --include-package=qfluentwidgets
+          --include-package-data=qfluentwidgets
+          --include-data-files=assets/runtime/adb.exe=assets/runtime/adb.exe
+          --include-data-files=assets/runtime/AdbWinApi.dll=assets/runtime/AdbWinApi.dll
+          --include-data-files=assets/runtime/AdbWinUsbApi.dll=assets/runtime/AdbWinUsbApi.dll
+          --include-data-files=assets/runtime/MtkDirectTool.jar=assets/runtime/MtkDirectTool.jar
+          --include-data-files=assets/runtime/ColorfulLedTool.jar=assets/runtime/ColorfulLedTool.jar
+          --include-data-files=assets/adb_guardian/adbguardian-signed.apk=assets/adb_guardian/adbguardian-signed.apk
+          --output-filename=MonitorToolbox.exe
+          --output-dir=dist-nuitka-standalone
+          --assume-yes-for-downloads
+          monitor_controller.py
+
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          Rename-Item dist-nuitka-standalone\monitor_controller.dist MonitorToolbox-portable
+          Compress-Archive -Path dist-nuitka-standalone\MonitorToolbox-portable -DestinationPath MonitorToolbox-portable.zip
+          Rename-Item dist-nuitka-standalone\MonitorToolbox-portable monitor_controller.dist
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$version" "installer\MonitorToolbox.iss"
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist-nuitka/MonitorToolbox.exe
+          files: |
+            dist-nuitka/MonitorToolbox.exe
+            MonitorToolbox-portable.zip
+            dist-installer/MonitorToolbox-Setup.exe
           generate_release_notes: true

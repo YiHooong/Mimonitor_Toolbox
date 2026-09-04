@@ -10,7 +10,7 @@ from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication
 from qfluentwidgets import Theme, setTheme
 
-from .core import get_app_data_dir, load_settings
+from .core import cleanup_stale_extract_dirs, get_app_data_dir, load_settings
 from .main_window import App
 
 
@@ -44,6 +44,8 @@ def _install_excepthook():
 
 def main() -> int:
     _install_excepthook()
+    # 后台清理 onefile/_MEI 解压残留，不阻塞启动
+    threading.Thread(target=cleanup_stale_extract_dirs, daemon=True).start()
     application = QApplication(sys.argv)
 
     check_socket = QLocalSocket()

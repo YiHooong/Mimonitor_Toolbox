@@ -1,7 +1,9 @@
 """配置、资源定位和跨功能常量。"""
 
+import glob
 import json
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -111,6 +113,41 @@ def bundled_resource_path(*parts):
     if os.path.exists(p):
         return p
     return None
+
+
+def cleanup_stale_extract_dirs(temp_dir=None):
+    """清理 %TEMP% 下的 onefile_/_MEI 解压残留目录。
+
+    PyInstaller 与 Nuitka onefile 被强杀或崩溃时不会清理各自的解压目录，
+    长期累积会占用上 GB 磁盘。运行中的实例必然加载着解压目录内的
+    python DLL（Windows 对已加载 DLL 拒绝写打开），以此判断存活并跳过；
+    不含 python DLL 的目录不属于标准解压布局，同样跳过。
+    """
+    base = temp_dir or os.environ.get("TEMP") or tempfile.gettempdir()
+    for prefix in ("onefile_", "_MEI"):
+        try:
+            candidates = glob.glob(os.path.join(base, prefix + "*"))
+        except OSError:
+            continue
+        for path in candidates:
+            if not os.path.isdir(path):
+                continue
+            try:
+                names = os.listdir(path)
+            except OSError:
+                continue
+            marker = next(
+                (n for n in names if n.lower().startswith("python") and n.lower().endswith(".dll")),
+                None,
+            )
+            if marker is None:
+                continue
+            try:
+                with open(os.path.join(path, marker), "r+b"):
+                    pass
+            except OSError:
+                continue  # DLL 被运行中的实例加载锁定
+            shutil.rmtree(path, ignore_errors=True)
 GUARDIAN_PACKAGE = "com.example.adbguardian"
 GUARDIAN_MAIN_ACTIVITY = f"{GUARDIAN_PACKAGE}/.MainActivity"
 GUARDIAN_ACCESSIBILITY = f"{GUARDIAN_PACKAGE}/{GUARDIAN_PACKAGE}.AdbGuardianAccessibilityService"

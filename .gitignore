@@ -5,4 +5,5 @@ __pycache__/
 /dist/
 /dist-nuitka/
 /dist-nuitka-standalone/
+/dist-installer/
 *.Zone.Identifier

@@ -1,6 +1,6 @@
 @echo off
-rem Nuitka standalone æ‰“åŒ…ï¼ˆæ–‡ä»¶å¤¹å½¢æ€ï¼Œå¯åŠ¨æœ€å¿«ï¼Œzip æ•´ä¸ª dist ç›®å½•åˆ†å‘ï¼‰ã€‚
-rem éœ€è¦ python.org å®‰è£…çš„ Pythonï¼ˆMicrosoft Store ç‰ˆç¼ºå°‘é“¾æ¥åº“ï¼Œæ— æ³•ç¼–è¯‘ï¼‰ã€‚
+rem Nuitka standalone ´ò°ü£¨ÎÄ¼ş¼ĞĞÎÌ¬£¬Æô¶¯×î¿ì£¬zip Õû¸ö dist Ä¿Â¼·Ö·¢£©¡£
+rem ĞèÒª python.org °²×°µÄ Python£¨Microsoft Store °æÈ±ÉÙÁ´½Ó¿â£¬ÎŞ·¨±àÒë£©¡£
 set PY=%LOCALAPPDATA%\Programs\Python\Python313\python.exe
 if not exist "%PY%" set PY=python
 "%PY%" -m pip install -r requirements-build.txt
